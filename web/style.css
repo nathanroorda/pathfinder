@@ -1,0 +1,90 @@
+:root {
+  color-scheme: light dark;
+  --ok: #2e9e5b;
+  --warm: #d98a3a;
+  --cool: #4a86c9;
+  --muted: #8a8a8a;
+}
+
+body {
+  font-family: system-ui, sans-serif;
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+}
+
+main {
+  padding: 1.5rem;
+  width: 100%;
+  max-width: 22rem;
+  text-align: center;
+}
+
+h1 { margin: 0 0 .5rem; font-size: 1.6rem; }
+
+.status { opacity: .7; margin: 0 0 1.5rem; }
+.status.connected { color: var(--ok); opacity: 1; }
+.status.offline   { color: #c2453f; opacity: 1; }
+
+button {
+  width: 100%;
+  padding: 1rem;
+  font-size: 1.1rem;
+  border-radius: .7rem;
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+button:active { transform: scale(.98); }
+button:disabled { opacity: .4; cursor: default; }
+
+.result { min-height: 1.2rem; margin: 1rem 0 0; opacity: .7; font-size: .9rem; }
+
+/* --- exposure triangle --- */
+.triangle { margin-top: 1.75rem; }
+.tri-title { font-size: 1.1rem; margin: 0 0 .5rem; }
+.tri-canvas { width: 100%; max-width: 20rem; height: auto; display: block; margin: 0 auto; color: inherit; }
+.tri-edge { fill: none; stroke: var(--muted); stroke-width: 1.5; opacity: .6; }
+.tri-axis { font-size: 11px; fill: currentColor; opacity: .7; }
+.tri-val  { font-size: 13px; fill: currentColor; font-weight: 600; }
+.tri-ev   { font-size: 12px; fill: #fff; font-weight: 600; }
+
+.tri-controls {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: .75rem; margin: .5rem 0 1rem; font-size: .85rem;
+}
+.tri-lock { display: flex; align-items: center; gap: .4rem; }
+.tri-compwrap { display: flex; align-items: center; gap: .4rem; opacity: .85; }
+.tri-compwrap select {
+  padding: .25rem .4rem; border-radius: .4rem; border: 1px solid currentColor;
+  background: transparent; color: inherit; font-size: .85rem;
+}
+
+.tri-row {
+  display: grid; grid-template-columns: 5rem 1fr auto; align-items: center;
+  gap: .5rem; padding: .35rem 0; text-align: left;
+}
+.tri-row-name { font-size: .9rem; opacity: .8; }
+.tri-row-val  { font-size: .9rem; font-weight: 600; }
+.tri-steppers { display: flex; gap: .4rem; }
+.tri-steppers button {
+  width: 2.4rem; padding: .3rem 0; font-size: 1.1rem; border-radius: .5rem;
+}
+
+.tri-note { min-height: 1rem; margin: .5rem 0 0; font-size: .8rem; color: var(--warm); }
+
+/* --- settings panel --- */
+.settings { margin-top: 1.75rem; display: grid; gap: .8rem; text-align: left; }
+.setting { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
+.setting > label { font-size: .9rem; opacity: .8; flex: 0 0 auto; }
+.setting select,
+.setting input[type="text"] {
+  flex: 0 0 auto; min-width: 9rem; padding: .4rem .5rem; font-size: .9rem;
+  border-radius: .5rem; border: 1px solid currentColor; background: transparent; color: inherit;
+}
+.setting input[type="range"] { flex: 1 1 auto; margin: 0 .5rem; }
+.setting output { flex: 0 0 auto; min-width: 3rem; text-align: right; font-size: .9rem; font-variant-numeric: tabular-nums; }
+.setting .toggle { width: auto; padding: .35rem .8rem; font-size: .85rem; border-radius: .5rem; }
+.setting .toggle[data-on="1"] { color: var(--ok); }
