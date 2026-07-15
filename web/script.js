@@ -9,11 +9,15 @@ async function api(url, opts) {
   return r.json();
 }
 
+let wasConnected = false;
+
 async function refreshStatus() {
   try {
     const s = await api("/api/status");
     statusEl.textContent = s.connected ? `Connected: ${s.model}` : "No camera connected";
     statusEl.className = "status " + (s.connected ? "connected" : "offline");
+    if (s.connected && !wasConnected) loadSettings();
+    wasConnected = s.connected;
   } catch {
     statusEl.textContent = "Server unreachable";
     statusEl.className = "status offline";

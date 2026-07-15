@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -11,8 +13,7 @@ os.environ.setdefault("LD_LIBRARY_PATH", "/usr/local/lib")
 
 import camera
 
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("pathfinder")
+log = logging.getLogger(__name__)
 
 
 class SettingValue(BaseModel):
@@ -23,16 +24,42 @@ def _try_connect(app: FastAPI) -> None:
     try:
         app.state.camera = camera.connect()
         log.info("camera connected: %s", app.state.camera.model)
+        app.state.camera_warned = False
     except Exception as exc:
         app.state.camera = None
-        log.warning("camera connect failed: %r", exc)
+        if not app.state.camera_warned:
+            log.warning("camera connect failed: %r", exc)
+            app.state.camera_warned = True
+        else:
+            log.debug("camera connect still failing: %r", exc)
+
+
+CAMERA_POLL_INTERVAL = 3.0
+_connect_lock = asyncio.Lock()
+
+
+async def _connect_if_needed(app: FastAPI) -> None:
+    async with _connect_lock:
+        if app.state.camera is None:
+            await run_in_threadpool(_try_connect, app)
+
+
+async def _camera_watcher(app: FastAPI) -> None:
+    while True:
+        await _connect_if_needed(app)
+        await asyncio.sleep(CAMERA_POLL_INTERVAL)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.camera = None
+    app.state.camera_warned = False
     _try_connect(app)
+    watcher = asyncio.create_task(_camera_watcher(app))
     yield
+    watcher.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await watcher
     if app.state.camera is not None:
         try:
             camera.disconnect(app.state.camera)
@@ -58,8 +85,7 @@ async def status():
 
 @app.post("/api/connect")
 async def connect():
-    if app.state.camera is None:
-        await run_in_threadpool(_try_connect, app)
+    await _connect_if_needed(app)
     if app.state.camera is None:
         raise HTTPException(status_code=503, detail="no camera found")
     return {"connected": True, "model": app.state.camera.model}
@@ -84,6 +110,7 @@ async def set_setting(name: str, body: SettingValue):
     try:
         await run_in_threadpool(cam.set_setting, name, body.value)
     except Exception as exc:
+        log.warning("set_setting %s=%r failed: %r", name, body.value, exc)
         raise HTTPException(status_code=400, detail=str(exc))
     return await run_in_threadpool(cam.list_settings)
 

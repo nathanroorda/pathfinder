@@ -1,3 +1,4 @@
+import logging
 import os
 import threading
 import time
@@ -5,6 +6,8 @@ import time
 import gphoto2 as gp
 
 from . import sony
+
+log = logging.getLogger(__name__)
 
 CAPTURE_DIR = os.environ.get("PATHFINDER_CAPTURE_DIR", "captures")
 
@@ -58,6 +61,7 @@ class Gphoto2Camera:
                 return self._cam.capture(gp.GP_CAPTURE_IMAGE)
             except gp.GPhoto2Error as exc:
                 if exc.code == gp.GP_ERROR and i < attempts - 1:
+                    log.warning("capture failed (attempt %d/%d): %r — retrying", i + 1, attempts, exc)
                     time.sleep(1.0)
                     self._drain_events()
                     continue
