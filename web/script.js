@@ -9,7 +9,6 @@ async function api(url, opts) {
   return r.json();
 }
 
-// --- status ---------------------------------------------------------------
 async function refreshStatus() {
   try {
     const s = await api("/api/status");
@@ -21,13 +20,12 @@ async function refreshStatus() {
   }
 }
 
-// --- capture --------------------------------------------------------------
 shootBtn.addEventListener("click", async () => {
   shootBtn.disabled = true;
   resultEl.textContent = "Firing…";
   try {
     await api("/api/capture", { method: "POST" });
-    resultEl.textContent = "Shot taken \u2713";
+    resultEl.textContent = "Shot taken ✓";
   } catch (e) {
     resultEl.textContent = `Error: ${e.message}`;
   } finally {
@@ -35,70 +33,66 @@ shootBtn.addEventListener("click", async () => {
   }
 });
 
-// --- settings -------------------------------------------------------------
-// One renderer per control kind. Add a kind here to support a new type.
-const renderers = {
-  choice: (s, apply) => {
-    const sel = document.createElement("select");
-    for (const c of s.choices) sel.add(new Option(c, c, false, c === s.value));
-    sel.addEventListener("change", () => apply(sel.value));
-    return sel;
+const settingRenderers = {
+  choice: (setting, apply) => {
+    const select = document.createElement("select");
+    for (const choice of setting.choices) {
+      select.add(new Option(choice, choice, false, choice === setting.value));
+    }
+    select.addEventListener("change", () => apply(select.value));
+    return select;
   },
-  toggle: (s, apply) => {
-    const btn = document.createElement("button");
-    btn.className = "toggle";
-    const on = Number(s.value) === 1;
-    btn.dataset.on = on ? "1" : "0";
-    btn.textContent = on ? "On" : "Off";
-    btn.addEventListener("click", () => apply(on ? 0 : 1));
-    return btn;
+  toggle: (setting, apply) => {
+    const button = document.createElement("button");
+    button.className = "toggle";
+    const isOn = Number(setting.value) === 1;
+    button.dataset.on = isOn ? "1" : "0";
+    button.textContent = isOn ? "On" : "Off";
+    button.addEventListener("click", () => apply(isOn ? 0 : 1));
+    return button;
   },
-  range: (s, apply) => {
+  range: (setting, apply) => {
     const wrap = document.createElement("div");
     wrap.style.cssText = "display:flex;align-items:center;flex:1 1 auto";
     const input = document.createElement("input");
     input.type = "range";
-    input.min = s.min; input.max = s.max; input.step = s.step || 1;
-    input.value = s.value;
-    const out = document.createElement("output");
-    out.textContent = s.value;
-    input.addEventListener("input", () => (out.textContent = input.value));
+    input.min = setting.min;
+    input.max = setting.max;
+    input.step = setting.step || 1;
+    input.value = setting.value;
+    const output = document.createElement("output");
+    output.textContent = setting.value;
+    input.addEventListener("input", () => (output.textContent = input.value));
     input.addEventListener("change", () => apply(input.value));
-    wrap.append(input, out);
+    wrap.append(input, output);
     return wrap;
   },
-  text: (s, apply) => {
+  text: (setting, apply) => {
     const input = document.createElement("input");
     input.type = "text";
-    input.value = s.value;
+    input.value = setting.value;
     input.addEventListener("change", () => apply(input.value));
     return input;
   },
 };
 
-function renderSettings(items) {
+function renderSettings(settings) {
   settingsEl.replaceChildren();
-  for (const s of items) {
-    const render = renderers[s.type];
+  for (const setting of settings) {
+    const render = settingRenderers[setting.type];
     if (!render) continue;
     const row = document.createElement("div");
     row.className = "setting";
     const label = document.createElement("label");
-    label.textContent = s.label;
-    row.append(label, render(s, (value) => applySetting(s.name, value)));
+    label.textContent = setting.label;
+    row.append(label, render(setting, (value) => applySetting(setting.name, value)));
     settingsEl.append(row);
   }
 }
 
-// Share fresh settings with every panel (dropdowns + exposure triangle).
-function broadcast(items) {
-  renderSettings(items);
-  window.dispatchEvent(new CustomEvent("pf:settings", { detail: items }));
-}
-
 async function loadSettings() {
   try {
-    broadcast(await api("/api/settings"));
+    renderSettings(await api("/api/settings"));
   } catch {
     settingsEl.replaceChildren();
   }
@@ -106,8 +100,7 @@ async function loadSettings() {
 
 async function applySetting(name, value) {
   try {
-    // The server returns the full refreshed set, since one change can affect others.
-    broadcast(await api(`/api/settings/${encodeURIComponent(name)}`, {
+    renderSettings(await api(`/api/settings/${encodeURIComponent(name)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ value }),
@@ -117,10 +110,6 @@ async function applySetting(name, value) {
   }
 }
 
-// When another panel (the triangle) changes a setting, refresh the dropdowns.
-window.addEventListener("pf:settings", (e) => renderSettings(e.detail));
-
-// --- init -----------------------------------------------------------------
 refreshStatus();
 loadSettings();
 setInterval(refreshStatus, 5000);

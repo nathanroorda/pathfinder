@@ -1,4 +1,3 @@
-"""HTTP layer: routes + static UI. Camera logic stays in the camera/ package."""
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -8,10 +7,9 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-# Let the gphoto2 binding find the source-built libgphoto2 in /usr/local/lib.
 os.environ.setdefault("LD_LIBRARY_PATH", "/usr/local/lib")
 
-import camera  # noqa: E402  (import after LD_LIBRARY_PATH is set)
+import camera
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("pathfinder")
@@ -87,9 +85,7 @@ async def set_setting(name: str, body: SettingValue):
         await run_in_threadpool(cam.set_setting, name, body.value)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    # Changing one setting can change others (e.g. mode), so return the fresh set.
     return await run_in_threadpool(cam.list_settings)
 
 
-# Serve the browser UI. Mounted last so /api/* wins.
 app.mount("/", StaticFiles(directory="web", html=True), name="web")

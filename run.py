@@ -1,4 +1,3 @@
-"""Start the Pathfinder server: python run.py -> http://<pi-ip>:8080"""
 import uvicorn
 
 from app import app

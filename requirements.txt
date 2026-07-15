@@ -1,7 +1,3 @@
-# Pathfinder (PATH-001) — Python dependencies
-# Install on the Pi inside a venv:  pip install -r requirements.txt
-# (run `sudo apt install libgphoto2-dev` first — the gphoto2 package builds against it)
-
 fastapi>=0.110          # web framework: routes + JSON (app.py)
 uvicorn>=0.29           # ASGI server that actually runs the app (run.py)
 websockets>=12 
