@@ -12,10 +12,24 @@ AP_CHANNEL="6"
 AP_ON_BOOT="${AP_ON_BOOT:-1}"
 
 SERVICE="pathfinder"
+TMUX_SESSION="pathfinder-setup"
 
 say()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m!  %s\033[0m\n' "$*"; }
 die()  { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
+
+if [ -z "${TMUX:-}" ] && [ -z "${PATHFINDER_NO_TMUX:-}" ]; then
+  if ! command -v tmux >/dev/null 2>&1; then
+    sudo apt-get update -qq && sudo apt-get install -y tmux
+  fi
+  if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+    echo "A setup session is already running — attaching you to it."
+    exec tmux attach -t "$TMUX_SESSION"
+  fi
+  echo "Launching setup inside tmux (session: $TMUX_SESSION)."
+  echo "If your connection drops, reconnect and run: tmux attach -t $TMUX_SESSION"
+  exec tmux new-session -s "$TMUX_SESSION" -- "$0" "$@"
+fi
 
 [ "$EUID" -ne 0 ] || die "Run as your normal user, not root/sudo — the venv must be yours."
 [ -f "$PROJECT_DIR/requirements.txt" ] || die "Run from the project root (requirements.txt not found)."
@@ -101,16 +115,7 @@ sudo nmcli con modify "$AP_CONN" wifi-sec.key-mgmt wpa-psk
 sudo nmcli con modify "$AP_CONN" wifi-sec.psk "$AP_PASS"
 sudo nmcli con modify "$AP_CONN" ipv4.method shared
 sudo nmcli con modify "$AP_CONN" ipv6.method disabled
-if [ "$AP_ON_BOOT" = "1" ]; then
-  sudo nmcli con modify "$AP_CONN" connection.autoconnect yes
-  sudo nmcli con modify "$AP_CONN" connection.autoconnect-priority 100
-  warn "AP is set to start on boot. After reboot the Pi hosts \"$AP_SSID\" and"
-  warn "is reachable ONLY at 10.42.0.1 (join that network, not home WiFi)."
-else
-  sudo nmcli con modify "$AP_CONN" connection.autoconnect no
-  warn "AP will NOT auto-start (AP_ON_BOOT=0). Bring it up manually with:"
-  warn "    sudo nmcli con up $AP_CONN"
-fi
+sudo nmcli con modify "$AP_CONN" connection.autoconnect no
 
 say "8/8  Install systemd service ($SERVICE.service)"
 SERVICE_GROUP="$(id -gn "$USER")"
@@ -150,6 +155,17 @@ camera.disconnect(cam)
 " || warn "Verify failed — check the camera is awake, PC Remote: On, and the cable is in the Pi's 'USB' port (not 'PWR')."
 else
   warn "You were just added to the 'plugdev' group — it applies on next login/reboot."
+fi
+
+say "Finalizing WiFi access point boot behavior"
+if [ "$AP_ON_BOOT" = "1" ]; then
+  sudo nmcli con modify "$AP_CONN" connection.autoconnect yes
+  sudo nmcli con modify "$AP_CONN" connection.autoconnect-priority 100
+  warn "AP is set to start on boot. After reboot the Pi hosts \"$AP_SSID\" and"
+  warn "is reachable ONLY at 10.42.0.1 (join that network, not home WiFi)."
+else
+  warn "AP will NOT auto-start (AP_ON_BOOT=0). Bring it up manually with:"
+  warn "    sudo nmcli con up $AP_CONN"
 fi
 
 cat <<NEXT
