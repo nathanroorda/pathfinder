@@ -4,7 +4,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -12,18 +12,12 @@ from pydantic import BaseModel
 os.environ.setdefault("LD_LIBRARY_PATH", "/usr/local/lib")
 
 import camera
-import network
 
 log = logging.getLogger(__name__)
 
 
 class SettingValue(BaseModel):
     value: str | int | float | bool
-
-
-class HomeNetworkRequest(BaseModel):
-    ssid: str
-    password: str
 
 
 def _try_connect(app: FastAPI) -> None:
@@ -42,9 +36,6 @@ def _try_connect(app: FastAPI) -> None:
 
 CAMERA_POLL_INTERVAL = 3.0
 _connect_lock = asyncio.Lock()
-
-NETWORK_SWITCH_DELAY = 1.5  # let the HTTP response flush before the radio moves
-_network_lock = asyncio.Lock()
 
 
 async def _connect_if_needed(app: FastAPI) -> None:
@@ -122,35 +113,6 @@ async def set_setting(name: str, body: SettingValue):
         log.warning("set_setting %s=%r failed: %r", name, body.value, exc)
         raise HTTPException(status_code=400, detail=str(exc))
     return await run_in_threadpool(cam.list_settings)
-
-
-@app.get("/api/network/status")
-async def network_status():
-    return await run_in_threadpool(network.status)
-
-
-async def _deferred_connect_home(ssid: str, password: str) -> None:
-    async with _network_lock:
-        await asyncio.sleep(NETWORK_SWITCH_DELAY)
-        await run_in_threadpool(network.connect_home, ssid, password)
-
-
-async def _deferred_connect_ap() -> None:
-    async with _network_lock:
-        await asyncio.sleep(NETWORK_SWITCH_DELAY)
-        await run_in_threadpool(network.connect_ap)
-
-
-@app.post("/api/network/home")
-async def network_home(body: HomeNetworkRequest, background_tasks: BackgroundTasks):
-    background_tasks.add_task(_deferred_connect_home, body.ssid, body.password)
-    return {"ok": True, "switching_to": body.ssid}
-
-
-@app.post("/api/network/ap")
-async def network_ap(background_tasks: BackgroundTasks):
-    background_tasks.add_task(_deferred_connect_ap)
-    return {"ok": True, "switching_to": network.AP_CONN}
 
 
 app.mount("/", StaticFiles(directory="web", html=True), name="web")

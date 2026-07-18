@@ -3,13 +3,6 @@ const resultEl = document.getElementById("result");
 const shootBtn = document.getElementById("shoot");
 const settingsEl = document.getElementById("settings");
 
-const netStatusEl = document.getElementById("net-status");
-const netSsidEl = document.getElementById("net-ssid");
-const netPasswordEl = document.getElementById("net-password");
-const netJoinBtn = document.getElementById("net-join");
-const netApBtn = document.getElementById("net-ap");
-const netResultEl = document.getElementById("net-result");
-
 async function api(url, opts) {
   const r = await fetch(url, opts);
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
@@ -121,71 +114,6 @@ async function applySetting(name, value) {
   }
 }
 
-let ssidTouched = false;
-netSsidEl.addEventListener("input", () => { ssidTouched = true; });
-
-async function refreshNetwork() {
-  try {
-    const n = await api("/api/network/status");
-    if (n.mode === "ap") {
-      netStatusEl.textContent = "Network: Pathfinder AP";
-    } else if (n.mode === "home") {
-      netStatusEl.textContent = `Network: Home (${n.home_ssid})`;
-    } else {
-      netStatusEl.textContent = "Network: unknown";
-    }
-    netStatusEl.className = "status " + (n.mode === "unknown" ? "offline" : "connected");
-    if (n.home_ssid && !ssidTouched) netSsidEl.value = n.home_ssid;
-  } catch {
-    netStatusEl.textContent = "Network: unreachable";
-    netStatusEl.className = "status offline";
-  }
-}
-
-netJoinBtn.addEventListener("click", async () => {
-  const ssid = netSsidEl.value.trim();
-  const password = netPasswordEl.value;
-  if (!ssid) {
-    netResultEl.textContent = "Enter a network name first.";
-    return;
-  }
-  netJoinBtn.disabled = true;
-  netApBtn.disabled = true;
-  try {
-    await api("/api/network/home", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ssid, password }),
-    });
-    netResultEl.textContent =
-      `Joining "${ssid}"… if it works, reconnect this device to that network and ` +
-      `reload pathfinder.local:8080. If the password's wrong or it's out of range, ` +
-      `Pathfinder falls back to its own AP within ~20s — rejoin "Pathfinder" to check.`;
-  } catch (e) {
-    netResultEl.textContent = `Error: ${e.message}`;
-  } finally {
-    netJoinBtn.disabled = false;
-    netApBtn.disabled = false;
-  }
-});
-
-netApBtn.addEventListener("click", async () => {
-  netJoinBtn.disabled = true;
-  netApBtn.disabled = true;
-  try {
-    await api("/api/network/ap", { method: "POST" });
-    netResultEl.textContent =
-      'Switching to the Pathfinder AP… reconnect this device to "Pathfinder" and reload pathfinder.local:8080.';
-  } catch (e) {
-    netResultEl.textContent = `Error: ${e.message}`;
-  } finally {
-    netJoinBtn.disabled = false;
-    netApBtn.disabled = false;
-  }
-});
-
 refreshStatus();
 loadSettings();
-refreshNetwork();
 setInterval(refreshStatus, 5000);
-setInterval(refreshNetwork, 5000);

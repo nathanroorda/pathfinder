@@ -3,8 +3,6 @@ set -euo pipefail
  
 LIBGPHOTO2_REPO="https://github.com/gphoto/libgphoto2.git"
 BUILD_DIR="$HOME/libgphoto2"
-GPHOTO2_CLI_REPO="https://github.com/gphoto/gphoto2.git"
-CLI_BUILD_DIR="$HOME/gphoto2-cli"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
  
 AP_CONN="pathfinder-ap"
@@ -41,14 +39,14 @@ fi
 [ -f "$PROJECT_DIR/requirements.txt" ] || die "Run from the project root (requirements.txt not found)."
 sudo -v || die "This script needs sudo access."
  
-say "1/9  System update + build & runtime packages"
+say "1/8  System update + build & runtime packages"
 sudo apt update
 sudo apt full-upgrade -y
 sudo apt install -y python3-venv python3-dev \
   git build-essential autoconf automake libtool pkg-config autopoint gettext \
   libltdl-dev libusb-1.0-0-dev libexif-dev libjpeg-dev libgd-dev
  
-say "2/9  Build libgphoto2 from source"
+say "2/8  Build libgphoto2 from source"
 if [ -f /usr/local/lib/libgphoto2.so ] && [ "${FORCE_BUILD:-0}" != "1" ]; then
   warn "libgphoto2 already in /usr/local — skipping build (FORCE_BUILD=1 to rebuild)."
 else
@@ -67,7 +65,7 @@ else
   sudo ldconfig
 fi
  
-say "3/9  Remove old apt libgphoto2 (would otherwise shadow the build)"
+say "3/8  Remove old apt libgphoto2 (would otherwise shadow the build)"
 PURGE=()
 for pkg in libgphoto2-6t64 libgphoto2-port12t64; do
   if dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then PURGE+=("$pkg"); fi
@@ -82,7 +80,7 @@ sudo ldconfig
 ldconfig -p | grep -q "/usr/local/lib/libgphoto2.so" \
   || die "libgphoto2 not resolving from /usr/local — build/install problem."
  
-say "4/9  Camera USB permissions (udev rules for every camera libgphoto2 supports)"
+say "4/8  Camera USB permissions (udev rules for every camera libgphoto2 supports)"
 PRINT_CAMERA_LIST="$(find /usr/local -type f -name print-camera-list | head -n1)"
 CHECK_PTP_CAMERA="$(find /usr/local -type f -name check-ptp-camera | head -n1)"
 [ -n "$PRINT_CAMERA_LIST" ] && [ -n "$CHECK_PTP_CAMERA" ] \
@@ -96,20 +94,20 @@ sudo usermod -aG plugdev "$USER"
 sudo udevadm control --reload-rules
 sudo udevadm trigger
  
-say "5/9  Python venv + dependencies"
+say "5/8  Python venv + dependencies"
 cd "$PROJECT_DIR"
 [ -d .venv ] || python3 -m venv .venv
 set +u; source .venv/bin/activate; set -u
 pip install --upgrade pip
 pip install -r requirements.txt
  
-say "6/9  Build the gphoto2 Python binding against /usr/local"
+say "6/8  Build the gphoto2 Python binding against /usr/local"
 PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
 LDFLAGS=-L/usr/local/lib \
 CFLAGS=-I/usr/local/include \
 pip install --no-binary :all: --force-reinstall --no-cache-dir gphoto2
  
-say "7/9  WiFi access point profile ($AP_SSID)"
+say "7/8  WiFi access point profile ($AP_SSID)"
 if nmcli -g NAME con show | grep -qx "$AP_CONN"; then
   warn "$AP_CONN already exists — updating its settings."
 else
@@ -122,23 +120,8 @@ sudo nmcli con modify "$AP_CONN" wifi-sec.psk "$AP_PASS"
 sudo nmcli con modify "$AP_CONN" ipv4.method shared
 sudo nmcli con modify "$AP_CONN" ipv6.method disabled
 sudo nmcli con modify "$AP_CONN" connection.autoconnect no
-
-say "8/9  mDNS + in-app network switching"
-sudo apt install -y avahi-daemon
-sudo hostnamectl set-hostname pathfinder
-sudo systemctl enable --now avahi-daemon
-SUDOERS_FILE=/etc/sudoers.d/pathfinder-nmcli
-SUDOERS_LINE="$USER ALL=(root) NOPASSWD: /usr/bin/nmcli"
-TMP_SUDOERS="$(mktemp)"
-echo "$SUDOERS_LINE" > "$TMP_SUDOERS"
-sudo visudo -cf "$TMP_SUDOERS" || die "generated sudoers line failed validation"
-sudo install -m 0440 "$TMP_SUDOERS" "$SUDOERS_FILE"
-rm -f "$TMP_SUDOERS"
-warn "The app can now switch WiFi networks itself — reachable at pathfinder.local"
-warn "regardless of AP vs. home network (pathfinder-home profile is created on"
-warn "first use from the app's network form)."
-
-say "9/9  Install systemd service ($SERVICE.service)"
+ 
+say "8/8  Install systemd service ($SERVICE.service)"
 SERVICE_GROUP="$(id -gn "$USER")"
 sudo tee "/etc/systemd/system/$SERVICE.service" >/dev/null <<UNIT
 [Unit]
@@ -183,7 +166,7 @@ if [ "$AP_ON_BOOT" = "1" ]; then
   sudo nmcli con modify "$AP_CONN" connection.autoconnect yes
   sudo nmcli con modify "$AP_CONN" connection.autoconnect-priority 100
   warn "AP is set to start on boot. After reboot the Pi hosts \"$AP_SSID\" and"
-  warn "is reachable at 10.42.0.1 or pathfinder.local (join that network, not home WiFi)."
+  warn "is reachable ONLY at 10.42.0.1 (join that network, not home WiFi)."
 else
   warn "AP will NOT auto-start (AP_ON_BOOT=0). Bring it up manually with:"
   warn "    sudo nmcli con up $AP_CONN"
@@ -197,14 +180,11 @@ Done. To bring up the access point AND the app together, reboot:
  
 After it comes back up (~30-60s), from a phone/laptop:
     1. Join WiFi "$AP_SSID"  (password: $AP_PASS)
-    2. Open  http://pathfinder.local:8080  (or http://10.42.0.1:8080)
-
-The app's Network section can switch the Pi to any home WiFi and back —
-pathfinder.local resolves on either network, so that's the address to bookmark.
-
+    2. Open  http://10.42.0.1:8080
+ 
 To reach the Pi over SSH once it's in AP mode:
-    ssh $USER@pathfinder.local
-
+    ssh $USER@10.42.0.1
+ 
 Service logs (for troubleshooting the app on boot):
     journalctl -u $SERVICE -f
 NEXT
