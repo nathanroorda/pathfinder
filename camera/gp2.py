@@ -70,7 +70,8 @@ class Gphoto2Camera:
     def list_settings(self):
         with self._lock:
             widgets = []
-            for section in self._cam.get_config().get_children():
+            config = self._cam.get_config()
+            for section in config.get_children():
                 if section.get_name() in INCLUDE_SECTIONS:
                     widgets += _walk(section)
             return [_describe(w) for w in widgets
