@@ -3,6 +3,8 @@ set -euo pipefail
  
 LIBGPHOTO2_REPO="https://github.com/gphoto/libgphoto2.git"
 BUILD_DIR="$HOME/libgphoto2"
+GPHOTO2_CLI_REPO="https://github.com/gphoto/gphoto2.git"
+GPHOTO2_CLI_BUILD_DIR="$HOME/gphoto2-cli"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
  
 AP_CONN="pathfinder-ap"
@@ -39,14 +41,14 @@ fi
 [ -f "$PROJECT_DIR/requirements.txt" ] || die "Run from the project root (requirements.txt not found)."
 sudo -v || die "This script needs sudo access."
  
-say "1/8  System update + build & runtime packages"
+say "1/9  System update + build & runtime packages"
 sudo apt update
 sudo apt full-upgrade -y
 sudo apt install -y python3-venv python3-dev \
   git build-essential autoconf automake libtool pkg-config autopoint gettext \
-  libltdl-dev libusb-1.0-0-dev libexif-dev libjpeg-dev libgd-dev
- 
-say "2/8  Build libgphoto2 from source"
+  libltdl-dev libusb-1.0-0-dev libexif-dev libjpeg-dev libgd-dev libpopt-dev
+
+say "2/9  Build libgphoto2 from source"
 if [ -f /usr/local/lib/libgphoto2.so ] && [ "${FORCE_BUILD:-0}" != "1" ]; then
   warn "libgphoto2 already in /usr/local — skipping build (FORCE_BUILD=1 to rebuild)."
 else
@@ -64,8 +66,28 @@ else
   )
   sudo ldconfig
 fi
- 
-say "3/8  Remove old apt libgphoto2 (would otherwise shadow the build)"
+
+say "3/9  Build gphoto2 CLI from source"
+if [ -f /usr/local/bin/gphoto2 ] && [ "${FORCE_BUILD:-0}" != "1" ]; then
+  warn "gphoto2 CLI already in /usr/local — skipping build (FORCE_BUILD=1 to rebuild)."
+else
+  if [ -d "$GPHOTO2_CLI_BUILD_DIR/.git" ]; then
+    git -C "$GPHOTO2_CLI_BUILD_DIR" pull --ff-only || true
+  else
+    git clone "$GPHOTO2_CLI_REPO" "$GPHOTO2_CLI_BUILD_DIR"
+  fi
+  (
+    cd "$GPHOTO2_CLI_BUILD_DIR"
+    export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
+    autoreconf -is
+    ./configure --prefix=/usr/local
+    make -j"$(nproc)"
+    sudo make install
+  )
+  sudo ldconfig
+fi
+
+say "4/9  Remove old apt libgphoto2 (would otherwise shadow the build)"
 PURGE=()
 for pkg in libgphoto2-6t64 libgphoto2-port12t64; do
   if dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then PURGE+=("$pkg"); fi
@@ -80,7 +102,7 @@ sudo ldconfig
 ldconfig -p | grep -q "/usr/local/lib/libgphoto2.so" \
   || die "libgphoto2 not resolving from /usr/local — build/install problem."
  
-say "4/8  Camera USB permissions (udev rules for every camera libgphoto2 supports)"
+say "5/9  Camera USB permissions (udev rules for every camera libgphoto2 supports)"
 PRINT_CAMERA_LIST="$(find /usr/local -type f -name print-camera-list | head -n1)"
 CHECK_PTP_CAMERA="$(find /usr/local -type f -name check-ptp-camera | head -n1)"
 [ -n "$PRINT_CAMERA_LIST" ] && [ -n "$CHECK_PTP_CAMERA" ] \
@@ -94,20 +116,20 @@ sudo usermod -aG plugdev "$USER"
 sudo udevadm control --reload-rules
 sudo udevadm trigger
  
-say "5/8  Python venv + dependencies"
+say "6/9  Python venv + dependencies"
 cd "$PROJECT_DIR"
 [ -d .venv ] || python3 -m venv .venv
 set +u; source .venv/bin/activate; set -u
 pip install --upgrade pip
 pip install -r requirements.txt
  
-say "6/8  Build the gphoto2 Python binding against /usr/local"
+say "7/9  Build the gphoto2 Python binding against /usr/local"
 PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
 LDFLAGS=-L/usr/local/lib \
 CFLAGS=-I/usr/local/include \
 pip install --no-binary :all: --force-reinstall --no-cache-dir gphoto2
  
-say "7/8  WiFi access point profile ($AP_SSID)"
+say "8/9  WiFi access point profile ($AP_SSID)"
 if nmcli -g NAME con show | grep -qx "$AP_CONN"; then
   warn "$AP_CONN already exists — updating its settings."
 else
@@ -121,7 +143,7 @@ sudo nmcli con modify "$AP_CONN" ipv4.method shared
 sudo nmcli con modify "$AP_CONN" ipv6.method disabled
 sudo nmcli con modify "$AP_CONN" connection.autoconnect no
  
-say "8/8  Install systemd service ($SERVICE.service)"
+say "9/9  Install systemd service ($SERVICE.service)"
 SERVICE_GROUP="$(id -gn "$USER")"
 sudo tee "/etc/systemd/system/$SERVICE.service" >/dev/null <<UNIT
 [Unit]
