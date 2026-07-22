@@ -85,6 +85,14 @@ class Gphoto2Camera:
             self._last_shot = time.monotonic()
             return target
 
+    def preview(self):
+        with self._lock:
+            self._require_open()
+            if self.recording:
+                raise RuntimeError("cannot preview while recording")
+            camera_file = self._cam.capture_preview()
+            return bytes(camera_file.get_data_and_size())
+
     def _drain_events(self, timeout_ms=200):
         try:
             while self._cam.wait_for_event(timeout_ms)[0] != gp.GP_EVENT_TIMEOUT:

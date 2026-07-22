@@ -4,8 +4,9 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -129,6 +130,41 @@ async def capture():
     except RuntimeError as exc:  # e.g. recording in progress
         raise HTTPException(status_code=409, detail=str(exc))
     return {"ok": True, "path": path}
+
+
+LIVEVIEW_BOUNDARY = "pathfinderframe"
+LIVEVIEW_FRAME_INTERVAL = 1 / 30
+
+
+@app.get("/api/liveview")
+async def liveview(request: Request):
+    _require_camera()
+
+    async def frames():
+        while not await request.is_disconnected():
+            cam = app.state.camera
+            if cam is None:
+                break
+            try:
+                jpeg = await _run_camera(cam.preview)
+            except HTTPException:
+                break  # camera dropped (503); the watcher will rebuild it
+            except Exception as exc:
+                log.debug("liveview frame failed: %r", exc)
+                await asyncio.sleep(0.3)
+                continue
+            yield (
+                b"--" + LIVEVIEW_BOUNDARY.encode() + b"\r\n"
+                b"Content-Type: image/jpeg\r\n"
+                b"Content-Length: " + str(len(jpeg)).encode() + b"\r\n\r\n"
+                + jpeg + b"\r\n"
+            )
+            await asyncio.sleep(LIVEVIEW_FRAME_INTERVAL)
+
+    return StreamingResponse(
+        frames(),
+        media_type=f"multipart/x-mixed-replace; boundary={LIVEVIEW_BOUNDARY}",
+    )
 
 
 async def _set_recording(on: bool):

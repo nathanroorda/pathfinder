@@ -15,10 +15,12 @@ documented in **`camera.md`**.
 
 ## Files
 
-- **`index.html`** — the page shell. A single `<main>` with five elements the
-  script drives by `id`: `#status` (connection line), `#shoot` (Capture button),
-  `#record` (Record/Stop button), `#result` (last-action feedback), and
-  `#settings` (the dynamic settings panel). Loads `style.css` in `<head>` and
+- **`index.html`** — the page shell. A single `<main>` with the elements the
+  script drives by `id`: `#status` (connection line), `#liveview` (the preview
+  box, wrapping the `#preview` `<img>` the MJPEG stream feeds), `#shoot` (Capture
+  button), `#record` (Record/Stop button), `#result` (last-action feedback), and
+  `#settings` (the dynamic settings panel). The liveview sits directly above the
+  two buttons. Loads `style.css` in `<head>` and
   `script.js` at the end of `<body>`. The favicon is a `data:,` no-op so the
   browser doesn't fire a 404 for `/favicon.ico`.
 - **`script.js`** — all behavior: status polling, the two capture buttons, and
@@ -59,6 +61,29 @@ the user as readable messages rather than silent failures — callers just
 This poll is the entire "liveness" mechanism: because `/api/status` never touches
 hardware (see **`app.md`**), it's cheap to hit every 5s, and it's what makes the
 UI recover on its own after the backend self-heals a dropped USB connection.
+
+### Liveview stream
+
+The preview is an **MJPEG stream**, not a poll loop: pointing `#preview`'s `src`
+at `/api/liveview` opens one long-lived `multipart/x-mixed-replace` connection
+that the browser decodes frame by frame, swapping the `<img>` in place. Clearing
+`src` tears the connection down (which also signals the server generator to stop,
+via `request.is_disconnected()`).
+
+`updateLiveview()` reconciles the stream toward a desired on-state of **`connected
+&& !recording`** and is idempotent — it only opens a stream when one isn't already
+running and only tears down when one is, so it's safe to call on every 5s status
+poll without restarting a healthy feed. It's invoked from `setRecording()` (so
+starting/stopping a recording toggles the preview) and from `refreshStatus()`'s
+error path (server unreachable → stop). The stream is deliberately **off while
+recording**: the backend refuses `preview()` mid-recording to avoid extra PTP
+traffic on the bus while the movie is rolling (see **`camera.md`**), so the client
+doesn't request frames it would only get errors for. A stream error (camera
+hiccup, or the server generator ending when the camera drops) fires the `<img>`
+`error` handler, which clears `src`; the next status poll re-opens it if the
+camera is still connected — the same self-healing pattern the settings panel and
+status line already rely on. `startLiveview()` appends a `?t=<now>` cache-buster
+so re-opening always starts a fresh stream rather than a cached/aborted one.
 
 ### Capture and Record buttons
 
@@ -129,3 +154,9 @@ Pure presentation, a few intentional choices worth noting:
   set, keeping the two loosely coupled.
 - The `range` `<output>` uses `font-variant-numeric: tabular-nums` so the live
   value doesn't jitter horizontally as digits change.
+- **`.liveview`** is a fixed `aspect-ratio: 3 / 2` box (matching the α7 IV
+  sensor/liveview frame, so the JPEG fills it without letterboxing) with a black
+  background; the `<img>` uses `object-fit: contain`. When the script adds the
+  `.offline` class (no camera, or recording), the image is hidden and a `"no
+  preview"` label shows via `::after` — the same class-driven, script-decides /
+  CSS-styles split used everywhere else.

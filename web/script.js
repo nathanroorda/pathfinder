@@ -3,6 +3,8 @@ const resultEl = document.getElementById("result");
 const shootBtn = document.getElementById("shoot");
 const recordBtn = document.getElementById("record");
 const settingsEl = document.getElementById("settings");
+const liveviewEl = document.getElementById("liveview");
+const previewImg = document.getElementById("preview");
 
 async function api(url, opts) {
   const r = await fetch(url, opts);
@@ -11,7 +13,27 @@ async function api(url, opts) {
 }
 
 let wasConnected = false;
+let connected = false;
 let recording = false;
+
+function startLiveview() {
+  previewImg.src = "/api/liveview?t=" + Date.now();  // cache-buster forces a fresh stream
+  liveviewEl.classList.remove("offline");
+}
+
+function stopLiveview() {
+  previewImg.removeAttribute("src");
+  liveviewEl.classList.add("offline");
+}
+
+function updateLiveview() {
+  const shouldStream = connected && !recording;
+  const streaming = previewImg.hasAttribute("src");
+  if (shouldStream && !streaming) startLiveview();
+  else if (!shouldStream && streaming) stopLiveview();
+}
+
+previewImg.addEventListener("error", stopLiveview);
 
 // Reflect recording state in the UI. Stills and video are mutually exclusive on
 // the camera, so the capture button is disabled while recording is in progress.
@@ -20,6 +42,7 @@ function setRecording(on) {
   recordBtn.textContent = on ? "Stop recording" : "Record";
   recordBtn.classList.toggle("recording", on);
   shootBtn.disabled = on;
+  updateLiveview();
 }
 
 async function refreshStatus() {
@@ -28,11 +51,14 @@ async function refreshStatus() {
     statusEl.textContent = s.connected ? `Connected: ${s.model}` : "No camera connected";
     statusEl.className = "status " + (s.connected ? "connected" : "offline");
     if (s.connected && !wasConnected) loadSettings();
-    setRecording(s.connected && s.recording);
+    connected = s.connected;
+    setRecording(s.connected && s.recording);  // also reconciles the liveview
     wasConnected = s.connected;
   } catch {
     statusEl.textContent = "Server unreachable";
     statusEl.className = "status offline";
+    connected = false;
+    updateLiveview();
   }
 }
 

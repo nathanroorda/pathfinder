@@ -79,6 +79,7 @@ All routes are declared directly on the `FastAPI()` instance in `app.py` (no rou
 | `GET` | `/api/status` | Returns `{connected, model, recording}` from current `app.state.camera`. Never touches hardware — just reads state (including the `recording` flag). |
 | `POST` | `/api/connect` | Forces a connection attempt via `_connect_if_needed` (reuses the same lock as the watcher). 503 if still no camera after trying. |
 | `POST` | `/api/capture` | 503 via `_require_camera()` if disconnected. Otherwise runs `cam.capture()` in a threadpool and returns the saved file path. Returns 409 if a recording is in progress (stills and video are mutually exclusive on the body). |
+| `GET` | `/api/liveview` | 503 if disconnected. Otherwise streams `multipart/x-mixed-replace` — a continuous MJPEG feed, one `cam.preview()` frame per part, that an `<img>` decodes in place. Each frame is a separate `_run_camera(cam.preview)` call, so it grabs the camera lock, pulls one frame, and releases, letting capture/record/settings interleave between frames. The generator stops when the client disconnects (`request.is_disconnected()`), when the camera drops (a 503 from `_run_camera` breaks the loop and the watcher rebuilds it), or paced by `LIVEVIEW_FRAME_INTERVAL`. |
 | `POST` | `/api/record/start` | 503 if disconnected. Sets the vendor's movie toggle widget on (`cam.set_recording(True)`), returns `{ok, recording}`. Idempotent — a no-op if already recording. 400 if the body exposes no movie widget. |
 | `POST` | `/api/record/stop` | Mirror of the above with the toggle off. Idempotent — a no-op if not recording. |
 | `GET` | `/api/settings` | Returns the camera's current writable settings as a list of widget descriptors (see below). |
@@ -105,6 +106,8 @@ have had first refusal.
     `threading.Lock` (`_lock`) guarding every hardware operation, since
     `run_in_threadpool` calls execute on worker threads and could otherwise overlap
     (e.g. a capture racing a settings write).
+  - `preview()` — grabs one liveview JPEG via `capture_preview()`; the driver
+    behind `/api/liveview`. Runs under `_lock` and refuses while recording.
   - `set_recording(on)` — starts/stops movie recording by writing the vendor's
     movie toggle widget (`_quirks["movie_widget"]`, default `"movie"`) with
     `set_config()`. Guarded by `_lock`; idempotent (compares against the tracked

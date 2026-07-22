@@ -24,6 +24,21 @@ h1 { margin: 0 0 .5rem; font-size: 1.6rem; }
 .status.connected { color: var(--ok); opacity: 1; }
 .status.offline   { color: #c2453f; opacity: 1; }
 
+.liveview {
+  width: 100%;
+  aspect-ratio: 3 / 2;
+  margin: 0 0 1rem;
+  border-radius: .7rem;
+  overflow: hidden;
+  background: #000;
+  display: grid;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+}
+.liveview img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.liveview.offline img { display: none; }
+.liveview.offline::after { content: "no preview"; color: #888; font-size: .85rem; }
+
 button {
   width: 100%;
   padding: 1rem;

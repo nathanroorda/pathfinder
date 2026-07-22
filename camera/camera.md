@@ -103,6 +103,19 @@ already in the requested state. The movie widget lives in gphoto2's `actions`
 config section, which `INCLUDE_SECTIONS` deliberately excludes, so it never shows
 up as a settings row in the UI — recording is a button, not a setting.
 
+### `preview()`
+
+Pulls a single **liveview frame** by calling `capture_preview()` and returning
+the JPEG bytes (`get_data_and_size()`). Like every other op it runs under `_lock`
+and grabs *one* frame per call — the caller (`app.py`'s `/api/liveview` MJPEG
+loop) reacquires the lock for each successive frame, so a capture, record, or
+settings write can interleave between frames instead of being starved by a
+long-held stream. It refuses with `RuntimeError` while `self.recording` is set:
+issuing extra PTP `capture_preview` traffic on the bus while a movie is rolling
+risks disturbing the recording, so previews and recording are kept mutually
+exclusive (the frontend also tears its stream down when recording starts, so
+this guard rarely fires — it's the backstop for a direct API hit).
+
 ### Settings: `list_settings()` / `set_setting()` and the widget model
 
 This is what makes the UI camera-agnostic. Rather than hardcoding controls,
