@@ -1,3 +1,3 @@
-from .gp2 import connect, disconnect
+from .gp2 import CameraDisconnected, connect, disconnect, is_disconnect_error
 
-__all__ = ["connect", "disconnect"]
+__all__ = ["CameraDisconnected", "connect", "disconnect", "is_disconnect_error"]

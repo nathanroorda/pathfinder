@@ -105,7 +105,8 @@ capturing journalctl's output:
 
 ```bash
 journalctl -u pathfinder --since "10 min ago" > pathfinder.log
-journalctl -u pathfinder -f | tee pathfinder.log     # live + save simultaneously
+journalctl -u pathfinder -f | tee pathfinder.log         # live + save simultaneously
+scp pathfinder@10.42.0.1:~/pathfinder.log ./debug.log    # export to local workspace
 ```
 
 ## Known limitations

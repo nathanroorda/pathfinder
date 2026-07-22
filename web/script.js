@@ -1,6 +1,7 @@
 const statusEl = document.getElementById("status");
 const resultEl = document.getElementById("result");
 const shootBtn = document.getElementById("shoot");
+const recordBtn = document.getElementById("record");
 const settingsEl = document.getElementById("settings");
 
 async function api(url, opts) {
@@ -10,6 +11,16 @@ async function api(url, opts) {
 }
 
 let wasConnected = false;
+let recording = false;
+
+// Reflect recording state in the UI. Stills and video are mutually exclusive on
+// the camera, so the capture button is disabled while recording is in progress.
+function setRecording(on) {
+  recording = on;
+  recordBtn.textContent = on ? "Stop recording" : "Record";
+  recordBtn.classList.toggle("recording", on);
+  shootBtn.disabled = on;
+}
 
 async function refreshStatus() {
   try {
@@ -17,6 +28,7 @@ async function refreshStatus() {
     statusEl.textContent = s.connected ? `Connected: ${s.model}` : "No camera connected";
     statusEl.className = "status " + (s.connected ? "connected" : "offline");
     if (s.connected && !wasConnected) loadSettings();
+    setRecording(s.connected && s.recording);
     wasConnected = s.connected;
   } catch {
     statusEl.textContent = "Server unreachable";
@@ -34,6 +46,21 @@ shootBtn.addEventListener("click", async () => {
     resultEl.textContent = `Error: ${e.message}`;
   } finally {
     shootBtn.disabled = false;
+  }
+});
+
+recordBtn.addEventListener("click", async () => {
+  const start = !recording;
+  recordBtn.disabled = true;
+  resultEl.textContent = start ? "Starting recording…" : "Stopping recording…";
+  try {
+    const s = await api(start ? "/api/record/start" : "/api/record/stop", { method: "POST" });
+    setRecording(s.recording);
+    resultEl.textContent = s.recording ? "Recording ●" : "Recording stopped ✓";
+  } catch (e) {
+    resultEl.textContent = `Error: ${e.message}`;
+  } finally {
+    recordBtn.disabled = false;
   }
 });
 

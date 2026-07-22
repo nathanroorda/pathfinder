@@ -11,7 +11,7 @@ log = logging.getLogger(__name__)
 
 CAPTURE_DIR = os.environ.get("PATHFINDER_CAPTURE_DIR", "captures")
 
-DEFAULT_QUIRKS = {"shot_gap": 0.0, "capture_retry_attempts": 1}
+DEFAULT_QUIRKS = {"shot_gap": 0.0, "capture_retry_attempts": 1, "movie_widget": "movie"}
 VENDORS = [sony]
 
 _KIND = {
@@ -24,6 +24,29 @@ _KIND = {
 
 INCLUDE_SECTIONS = {"imgsettings", "capturesettings", "settings"}
 
+_DISCONNECT_CODES = frozenset(
+    getattr(gp, name)
+    for name in (
+        "GP_ERROR_IO",            # -7  generic I/O failure
+        "GP_ERROR_IO_INIT",       # -31 I/O init failed
+        "GP_ERROR_IO_READ",       # -34 read failed
+        "GP_ERROR_IO_WRITE",      # -35 write failed
+        "GP_ERROR_IO_USB_FIND",   # -52 device no longer at its USB address
+        "GP_ERROR_IO_USB_CLAIM",  # -53 interface claim lost
+    )
+    if hasattr(gp, name)
+)
+
+
+class CameraDisconnected(Exception):
+    """An operation was attempted on a connection that has been closed."""
+
+
+def is_disconnect_error(exception):
+    if isinstance(exception, CameraDisconnected):
+        return True
+    return isinstance(exception, gp.GPhoto2Error) and exception.code in _DISCONNECT_CODES
+
 
 class Gphoto2Camera:
     def __init__(self, cam, model):
@@ -32,9 +55,24 @@ class Gphoto2Camera:
         self._last_shot = 0.0
         self.model = model
         self._quirks = _quirks_for(model)
+        self.recording = False
+
+    def _require_open(self):
+        if self._cam is None:
+            raise CameraDisconnected("camera connection is closed")
+
+    def close(self):
+        with self._lock:
+            if self._cam is None:
+                return
+            cam, self._cam = self._cam, None
+            cam.exit()
 
     def capture(self, save_dir=CAPTURE_DIR):
         with self._lock:
+            self._require_open()
+            if self.recording:
+                raise RuntimeError("cannot capture a still while recording")
             wait = self._quirks["shot_gap"] - (time.monotonic() - self._last_shot)
             if wait > 0:
                 time.sleep(wait)
@@ -67,8 +105,22 @@ class Gphoto2Camera:
                     continue
                 raise
 
+    def set_recording(self, on):
+        on = bool(on)
+        with self._lock:
+            self._require_open()
+            if on == self.recording:
+                return self.recording
+            cfg = self._cam.get_config()
+            widget = cfg.get_child_by_name(self._quirks["movie_widget"])
+            widget.set_value(1 if on else 0)
+            self._cam.set_config(cfg)
+            self.recording = on
+            return self.recording
+
     def list_settings(self):
         with self._lock:
+            self._require_open()
             widgets = []
             config = self._cam.get_config()
             for section in config.get_children():
@@ -79,6 +131,7 @@ class Gphoto2Camera:
 
     def set_setting(self, name, value):
         with self._lock:
+            self._require_open()
             cfg = self._cam.get_config()
             widget = cfg.get_child_by_name(name)
             widget.set_value(_coerce(widget.get_type(), value))
@@ -139,4 +192,4 @@ def connect():
 
 
 def disconnect(camera):
-    camera._cam.exit()
+    camera.close()

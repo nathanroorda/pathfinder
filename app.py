@@ -61,6 +61,11 @@ async def lifespan(app: FastAPI):
     with contextlib.suppress(asyncio.CancelledError):
         await watcher
     if app.state.camera is not None:
+        if app.state.camera.recording:
+            try:
+                app.state.camera.set_recording(False)
+            except Exception:
+                pass
         try:
             camera.disconnect(app.state.camera)
         except Exception:
@@ -77,10 +82,35 @@ def _require_camera():
     return cam
 
 
+async def _drop_camera(exc):
+    old = app.state.camera
+    app.state.camera = None
+    app.state.camera_warned = False
+    if old is None:
+        return
+    log.warning("camera connection lost (%r); dropping — watcher will reconnect", exc)
+    with contextlib.suppress(Exception):
+        await run_in_threadpool(camera.disconnect, old)
+
+
+async def _run_camera(method, *args):
+    try:
+        return await run_in_threadpool(method, *args)
+    except Exception as exc:
+        if camera.is_disconnect_error(exc):
+            await _drop_camera(exc)
+            raise HTTPException(status_code=503, detail="camera disconnected") from exc
+        raise
+
+
 @app.get("/api/status")
 async def status():
     cam = app.state.camera
-    return {"connected": cam is not None, "model": cam.model if cam else None}
+    return {
+        "connected": cam is not None,
+        "model": cam.model if cam else None,
+        "recording": cam.recording if cam else False,
+    }
 
 
 @app.post("/api/connect")
@@ -94,25 +124,52 @@ async def connect():
 @app.post("/api/capture")
 async def capture():
     cam = _require_camera()
-    path = await run_in_threadpool(cam.capture)
+    try:
+        path = await _run_camera(cam.capture)
+    except RuntimeError as exc:  # e.g. recording in progress
+        raise HTTPException(status_code=409, detail=str(exc))
     return {"ok": True, "path": path}
+
+
+async def _set_recording(on: bool):
+    cam = _require_camera()
+    try:
+        recording = await _run_camera(cam.set_recording, on)
+    except HTTPException:
+        raise  # disconnect (503) — don't mask it as a 400
+    except Exception as exc:
+        log.warning("set_recording(%s) failed: %r", on, exc)
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "recording": recording}
+
+
+@app.post("/api/record/start")
+async def record_start():
+    return await _set_recording(True)
+
+
+@app.post("/api/record/stop")
+async def record_stop():
+    return await _set_recording(False)
 
 
 @app.get("/api/settings")
 async def get_settings():
     cam = _require_camera()
-    return await run_in_threadpool(cam.list_settings)
+    return await _run_camera(cam.list_settings)
 
 
 @app.post("/api/settings/{name}")
 async def set_setting(name: str, body: SettingValue):
     cam = _require_camera()
     try:
-        await run_in_threadpool(cam.set_setting, name, body.value)
+        await _run_camera(cam.set_setting, name, body.value)
+    except HTTPException:
+        raise  # disconnect (503) — don't mask it as a 400
     except Exception as exc:
         log.warning("set_setting %s=%r failed: %r", name, body.value, exc)
         raise HTTPException(status_code=400, detail=str(exc))
-    return await run_in_threadpool(cam.list_settings)
+    return await _run_camera(cam.list_settings)
 
 
 app.mount("/", StaticFiles(directory="web", html=True), name="web")

@@ -37,6 +37,9 @@ button {
 button:active { transform: scale(.98); }
 button:disabled { opacity: .4; cursor: default; }
 
+#record { margin-top: .6rem; }
+#record.recording { color: #c2453f; }
+
 .result { min-height: 1.2rem; margin: 1rem 0 0; opacity: .7; font-size: .9rem; }
 
 .settings { margin-top: 1.75rem; display: grid; gap: .8rem; text-align: left; }

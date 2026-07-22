@@ -1,6 +1,7 @@
 GENERAL = {
     "shot_gap": 1.5,
     "capture_retry_attempts": 2,
+    "movie_widget": "movie",
 }
 
 MODELS = {

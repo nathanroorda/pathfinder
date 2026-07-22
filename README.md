@@ -25,7 +25,7 @@ For a Pathfinder device that's already been provisioned:
 3. Open `http://10.42.0.1:8080` in a browser.
 4. Plug the camera into the Pi's USB port and power it on. If the camera has a "PC Remote" / tether mode, enable it.
 5. The status line should read **Connected: \<camera model\>** within a few seconds.
-6. Adjust settings and tap **Capture**.
+6. Adjust settings and tap **Capture** for a still, or **Record** to start/stop video.
 
 ## File Layout
 
@@ -54,7 +54,7 @@ For a Pathfinder device that's already been provisioned:
 
 ## Architecture
 
-- **`app.py` / `run.py`** — a FastAPI app exposing a small REST API (`/api/status`, `/api/connect`, `/api/capture`, `/api/settings`) and serving `web/` as static files. Runs under `uvicorn`.
+- **`app.py` / `run.py`** — a FastAPI app exposing a small REST API (`/api/status`, `/api/connect`, `/api/capture`, `/api/record/start`, `/api/record/stop`, `/api/settings`) and serving `web/` as static files. Runs under `uvicorn`.
 - **`camera/`** — wraps the `gphoto2` Python binding. `gp2.py` handles connecting, capturing, and reading/writing settings; `sony.py` holds per-model timing/retry quirks looked up by camera model string.
 - **`web/`** — a small vanilla JS/HTML/CSS frontend. It polls `/api/status`, renders whatever settings the connected camera reports (choice/toggle/range/text controls, built dynamically from the API response), and posts changes back.
 

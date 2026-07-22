@@ -48,12 +48,26 @@ Key points:
 - All actual `gphoto2` calls run via `run_in_threadpool` — the binding is a blocking
   C extension, so keeping it off the event loop is what keeps `/api/status` polling
   and the settings UI responsive while a capture or reconnect is in flight.
-- If the camera disappears mid-session (unplugged), the app doesn't proactively
-  detect it — `app.state.camera` stays set until the next operation on it raises,
-  at which point the caller sees a 5xx/error from that specific call. Recovery
-  happens the next time a route calls `_require_camera()` after the watcher notices
-  and resets state to `None`. This is a known gap: a hard disconnect surfaces on the
-  *next* API call, not instantly.
+- If the camera disappears mid-session (unplugged, or a Sony body re-enumerating
+  on the USB bus mid-capture), the app doesn't *proactively* detect it —
+  `app.state.camera` stays set until the next operation on it raises. But that
+  failing operation now triggers recovery: every hardware route runs through
+  `_run_camera()`, which inspects the exception via `camera.is_disconnect_error()`
+  — true for transport-level gphoto2 codes (`GP_ERROR_IO` -7, `GP_ERROR_IO_USB_FIND`
+  -52, `GP_ERROR_IO_USB_CLAIM` -53, and other I/O codes) that mean the USB handle
+  is dead rather than the request being bad. On such an error `_drop_camera()` nulls
+  `app.state.camera` (after best-effort `close()`ing the stale handle to release the
+  USB claim) and the caller gets a **503**. The `_camera_watcher` loop then re-inits
+  a fresh connection within `CAMERA_POLL_INTERVAL` (≤3s), which re-resolves the
+  camera's current USB address. Without this, a stale handle would fail *identically*
+  on every subsequent call forever (the watcher only reconnects when state is `None`),
+  which is exactly the failure captured in early field logs. A hard disconnect still
+  surfaces on the *next* API call as a one-off 503, not instantly — but it now
+  self-heals instead of wedging the connection.
+
+  Logical errors (a bad setting value, a capture refused because recording is in
+  progress) are *not* disconnect errors: they propagate as 400/409 and leave the
+  connection intact.
 
 ## HTTP API
 
@@ -62,9 +76,11 @@ All routes are declared directly on the `FastAPI()` instance in `app.py` (no rou
 
 | Method | Path | Behavior |
 |---|---|---|
-| `GET` | `/api/status` | Returns `{connected, model}` from current `app.state.camera`. Never touches hardware — just reads state. |
+| `GET` | `/api/status` | Returns `{connected, model, recording}` from current `app.state.camera`. Never touches hardware — just reads state (including the `recording` flag). |
 | `POST` | `/api/connect` | Forces a connection attempt via `_connect_if_needed` (reuses the same lock as the watcher). 503 if still no camera after trying. |
-| `POST` | `/api/capture` | 503 via `_require_camera()` if disconnected. Otherwise runs `cam.capture()` in a threadpool and returns the saved file path. |
+| `POST` | `/api/capture` | 503 via `_require_camera()` if disconnected. Otherwise runs `cam.capture()` in a threadpool and returns the saved file path. Returns 409 if a recording is in progress (stills and video are mutually exclusive on the body). |
+| `POST` | `/api/record/start` | 503 if disconnected. Sets the vendor's movie toggle widget on (`cam.set_recording(True)`), returns `{ok, recording}`. Idempotent — a no-op if already recording. 400 if the body exposes no movie widget. |
+| `POST` | `/api/record/stop` | Mirror of the above with the toggle off. Idempotent — a no-op if not recording. |
 | `GET` | `/api/settings` | Returns the camera's current writable settings as a list of widget descriptors (see below). |
 | `POST` | `/api/settings/{name}` | Body `{value}` (str/int/float/bool). Sets one setting; on failure returns 400 with the underlying error; on success re-reads and returns the full settings list so the UI can pick up any settings that changed as a side effect (e.g. aperture limits shifting with ISO). |
 
@@ -89,6 +105,14 @@ have had first refusal.
     `threading.Lock` (`_lock`) guarding every hardware operation, since
     `run_in_threadpool` calls execute on worker threads and could otherwise overlap
     (e.g. a capture racing a settings write).
+  - `set_recording(on)` — starts/stops movie recording by writing the vendor's
+    movie toggle widget (`_quirks["movie_widget"]`, default `"movie"`) with
+    `set_config()`. Guarded by `_lock`; idempotent (compares against the tracked
+    `recording` flag and no-ops if already in the requested state). The `recording`
+    attribute is written here under the lock but read lock-free by `/api/status` —
+    safe because a lone bool read/write is atomic under the GIL, so only the
+    check-then-act needs the lock. The movie widget lives in gphoto2's `actions`
+    section, which `INCLUDE_SECTIONS` excludes, so it never appears as a settings row.
   - `capture()`:
     1. Enforces `shot_gap` — a per-model minimum interval since the last shot,
        sleeping out the remainder if called too soon.
