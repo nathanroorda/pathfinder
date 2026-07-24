@@ -94,16 +94,6 @@ recordBtn.addEventListener("click", async () => {
   }
 });
 
-// Focus controls. AF triggers a one-shot autofocus; the ◀/▶ buttons nudge focus
-// by a signed step count (near = negative, far = positive). These are momentary
-// action-widget writes on the body — allowed during recording too, so you can
-// rack focus mid-take, which is why they aren't gated on the recording flag.
-//
-// The backend may switch the body's focus mode to reach the motor (AF needs an
-// AF mode, the nudge needs Manual), which makes the settings panel's focusmode
-// row stale. We reconcile with a *generic*, debounced settings refresh — kept
-// camera-agnostic (no hardcoded widget name) and coalesced so a burst of nudges
-// triggers one reload, not one per press.
 let settingsRefreshTimer;
 function scheduleSettingsRefresh() {
   clearTimeout(settingsRefreshTimer);
