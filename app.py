@@ -219,6 +219,12 @@ async def manual_focus(body: FocusStep):
     return {"ok": True, "focusmode": mode}
 
 
+@app.get("/api/telemetry")
+async def telemetry():
+    cam = _require_camera()
+    return await _run_camera(cam.telemetry)
+
+
 @app.get("/api/settings")
 async def get_settings():
     cam = _require_camera()

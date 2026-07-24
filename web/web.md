@@ -17,15 +17,17 @@ documented in **`camera.md`**.
 
 - **`index.html`** — the page shell. A single `<main>` with the elements the
   script drives by `id`: `#status` (connection line), `#liveview` (the preview
-  box, wrapping the `#preview` `<img>` the MJPEG stream feeds), `#focus` (the
+  box, wrapping the `#preview` `<img>` the MJPEG stream feeds), `#telemetry` (the
+  read-only battery/storage/lens chip strip), `#focus` (the
   focus control group: `#af` plus `#focusNear`/`#focusStep`/`#focusFar`), `#shoot`
   (Capture button), `#record` (Record/Stop button), `#result` (last-action
   feedback), and `#settings` (the dynamic settings panel). The liveview sits
-  directly above the focus group and the two buttons. Loads `style.css` in `<head>` and
+  directly above the telemetry strip, the focus group, and the two buttons. Loads `style.css` in `<head>` and
   `script.js` at the end of `<body>`. The favicon is a `data:,` no-op so the
   browser doesn't fire a 404 for `/favicon.ico`.
 - **`script.js`** — all behavior: status polling, the liveview stream, the
-  capture/record and focus controls, and dynamic settings rendering.
+  capture/record and focus controls, telemetry polling, and dynamic settings
+  rendering.
 - **`style.css`** — styling only; no logic. Mobile-first, single-column, and
   theme-aware.
 
@@ -53,8 +55,8 @@ the user as readable messages rather than silent failures — callers just
 - updates `#status` to `Connected: <model>` or `No camera connected`, with a
   matching CSS class for color;
 - on a **transition** into the connected state (tracked by the `wasConnected`
-  flag), calls `loadSettings()` — so the panel populates the moment a camera is
-  plugged in, without re-fetching settings on every poll;
+  flag), calls `loadSettings()` *and* `loadTelemetry()` — so both panels populate
+  the moment a camera is plugged in, without re-fetching on every poll;
 - reflects the camera's `recording` flag into the UI via `setRecording()`;
 - on a thrown error (server unreachable), shows `Server unreachable` and marks
   the status offline.
@@ -62,6 +64,17 @@ the user as readable messages rather than silent failures — callers just
 This poll is the entire "liveness" mechanism: because `/api/status` never touches
 hardware (see **`app.md`**), it's cheap to hit every 5s, and it's what makes the
 UI recover on its own after the backend self-heals a dropped USB connection.
+
+### Telemetry strip
+
+`loadTelemetry()` `GET`s `/api/telemetry` and renders the read-only
+battery/storage/lens fields as compact `#telemetry` chips (`renderTelemetry`
+drops any chip whose value is `null`/empty). Unlike status, telemetry *does* touch
+hardware — each read takes the camera lock for a `get_config()` — so it polls on a
+**gentler 15s cadence** and `loadTelemetry()` early-returns when disconnected or
+recording, leaving the lock to the movie session. The strip is cleared on
+disconnect; on a transient read failure it keeps the last-known chips rather than
+blanking.
 
 ### Liveview stream
 

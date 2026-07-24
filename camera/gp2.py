@@ -35,6 +35,7 @@ _KIND = {
 }
 
 INCLUDE_SECTIONS = {"imgsettings", "capturesettings", "settings"}
+STATUS_SECTIONS = {"status"}
 
 _DISCONNECT_CODES = frozenset(
     getattr(gp, name)
@@ -193,6 +194,16 @@ class Gphoto2Camera:
             widget.set_value(_coerce(widget.get_type(), value))
             self._cam.set_config(cfg)
 
+    def telemetry(self):
+        with self._lock:
+            self._require_open()
+            widgets = []
+            config = self._cam.get_config()
+            for section in config.get_children():
+                if section.get_name() in STATUS_SECTIONS:
+                    widgets += _walk(section)
+            return [_describe_status(w) for w in widgets]
+
 
 def _walk(widget):
     result = []
@@ -218,6 +229,18 @@ def _describe(widget):
     elif kind == "range":
         info["min"], info["max"], info["step"] = widget.get_range()
     return info
+
+
+def _describe_status(widget):
+    try:
+        value = widget.get_value()
+    except gp.GPhoto2Error:
+        value = None
+    return {
+        "name": widget.get_name(),
+        "label": widget.get_label(),
+        "value": value,
+    }
 
 
 def _coerce(widget_type, value):

@@ -28,7 +28,8 @@ app.py ──import camera──▶ camera/__init__.py ──▶ gp2.py ──�
   is `CapWords` because it's a class; the rest are `snake_case` functions — the
   standard Python split, not an inconsistency.)
 - **`gp2.py`** — the libgphoto2 backend. Connection, capture, recording,
-  settings read/write, and the disconnect-error classification all live here.
+  settings read/write, telemetry, and the disconnect-error classification all
+  live here.
 - **`sony.py`** — a per-model **quirk table**. No `gphoto2` calls; pure data plus
   a lookup function. This is the one file you add to when onboarding a new
   camera body.
@@ -49,7 +50,7 @@ design points drive everything else in the class:
 
 **1. One lock guards every hardware op.** `_lock` (a `threading.Lock`) wraps the
 body of `capture`, `preview`, `set_recording`, `autofocus`, `manual_focus`,
-`list_settings`, `set_setting`, and `close`.
+`list_settings`, `set_setting`, `telemetry`, and `close`.
 This matters because `app.py` runs these on threadpool workers — without the
 lock, a capture and a settings write could execute inside libgphoto2
 concurrently, which the binding doesn't tolerate. `_require_open()` (called at the
@@ -200,6 +201,16 @@ Pathfinder reflects whatever the connected body exposes:
 - **`set_setting(name, value)`** looks the widget up by name, coerces `value` to
   the type gphoto2 expects for that widget kind (`_coerce`), and writes it back
   with `set_config()`.
+- **`telemetry()`** is the read-only counterpart: it walks the same config tree
+  but keeps leaf widgets under `STATUS_SECTIONS` = `{status}` — the battery,
+  frames-remaining, model, serial, and lens fields the body reports but you don't
+  edit. These are deliberately *excluded* from `list_settings()` by its
+  not-read-only filter, so the two surfaces don't overlap. Each is reduced to a
+  bare `{name, label, value}` by `_describe_status` (no `type`/`choices`/`range`,
+  since nothing renders them as editable controls). Reading an individual status
+  widget's value can fail on some bodies — a prop the driver advertises but can't
+  poll — so `_describe_status` swallows that `GPhoto2Error` and reports `value:
+  None` rather than letting one bad widget sink the whole panel.
 
 The type mapping (`_KIND`) collapses gphoto2's widget types into four render
 kinds — this is the vocabulary the frontend renders against:

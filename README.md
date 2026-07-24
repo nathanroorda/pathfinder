@@ -54,7 +54,7 @@ For a Pathfinder device that's already been provisioned:
 
 ## Architecture
 
-- **`app.py` / `run.py`** — a FastAPI app exposing a small REST API (`/api/status`, `/api/connect`, `/api/capture`, `/api/liveview`, `/api/record/*`, `/api/autofocus`, `/api/focus`, `/api/settings`) and serving `web/` as static files. Runs under `uvicorn`.
+- **`app.py` / `run.py`** — a FastAPI app exposing a small REST API (`/api/status`, `/api/connect`, `/api/capture`, `/api/liveview`, `/api/record/*`, `/api/autofocus`, `/api/focus`, `/api/telemetry`, `/api/settings`) and serving `web/` as static files. Runs under `uvicorn`.
 - **`camera/`** — wraps the `gphoto2` Python binding. `gp2.py` handles connecting, capturing, live preview, recording, focus, and reading/writing settings; `sony.py` holds per-model quirks (timing, retry, focus widgets & modes) looked up by camera model string.
 - **`web/`** — a small vanilla JS/HTML/CSS frontend. It shows a live preview and focus controls, renders whatever settings the connected camera reports (choice/toggle/range/text controls, built dynamically from the API response), and posts changes back.
 

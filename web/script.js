@@ -5,6 +5,7 @@ const recordBtn = document.getElementById("record");
 const settingsEl = document.getElementById("settings");
 const liveviewEl = document.getElementById("liveview");
 const previewImg = document.getElementById("preview");
+const telemetryEl = document.getElementById("telemetry");
 const afBtn = document.getElementById("af");
 const focusNearBtn = document.getElementById("focusNear");
 const focusFarBtn = document.getElementById("focusFar");
@@ -54,15 +55,43 @@ async function refreshStatus() {
     const s = await api("/api/status");
     statusEl.textContent = s.connected ? `Connected: ${s.model}` : "No camera connected";
     statusEl.className = "status " + (s.connected ? "connected" : "offline");
-    if (s.connected && !wasConnected) loadSettings();
     connected = s.connected;
+    if (s.connected && !wasConnected) { loadSettings(); loadTelemetry(); }
+    if (!s.connected) telemetryEl.replaceChildren();
     setRecording(s.connected && s.recording);  // also reconciles the liveview
     wasConnected = s.connected;
   } catch {
     statusEl.textContent = "Server unreachable";
     statusEl.className = "status offline";
     connected = false;
+    telemetryEl.replaceChildren();
     updateLiveview();
+  }
+}
+
+function renderTelemetry(items) {
+  telemetryEl.replaceChildren();
+  for (const item of items) {
+    if (item.value === null || item.value === "") continue;
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    const k = document.createElement("span");
+    k.className = "k";
+    k.textContent = item.label;
+    const v = document.createElement("span");
+    v.className = "v";
+    v.textContent = item.value;
+    chip.append(k, v);
+    telemetryEl.append(chip);
+  }
+}
+
+async function loadTelemetry() {
+  if (!connected || recording) return;
+  try {
+    renderTelemetry(await api("/api/telemetry"));
+  } catch {
+    /* transient (e.g. camera busy); keep the last-known chips */
   }
 }
 
@@ -209,3 +238,4 @@ async function applySetting(name, value) {
 refreshStatus();
 loadSettings();
 setInterval(refreshStatus, 5000);
+setInterval(loadTelemetry, 15000);
