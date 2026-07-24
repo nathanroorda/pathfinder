@@ -24,13 +24,13 @@ only.
 Log level is set once, at process start, via an environment variable:
 
 ```
-PATHFINDER_LOG_LEVEL=DEBUG|INFO|WARNING|ERROR   (default: INFO)
+PATHFINDER_LOG_LEVEL=DEBUG|INFO|WARNING|ERROR   (default: DEBUG)
 ```
 
 Read in `log.py`, converted to a `logging` level constant, and passed to
-`basicConfig(level=...)`. Invalid/unset values silently fall back to `INFO`.
-Because it's read once at startup, changing it requires a process restart —
-there's no live reload.
+`basicConfig(level=...)`. **Unset** defaults to `DEBUG` (`DEFAULT_LEVEL`); a value
+that isn't a real level name (e.g. a typo) falls back to `INFO`. Because it's read
+once at startup, changing it requires a process restart — there's no live reload.
 
 ## How stdout becomes durable: systemd + journald
 

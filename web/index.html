@@ -14,6 +14,18 @@
     <div id="liveview" class="liveview offline">
       <img id="preview" alt="live preview">
     </div>
+    <div id="focus" class="focus">
+      <button id="af" class="focus-af">AF</button>
+      <div class="focus-drive">
+        <button id="focusNear" class="focus-step" title="focus nearer" aria-label="focus nearer">◀</button>
+        <select id="focusStep" aria-label="focus step size">
+          <option value="1">Fine</option>
+          <option value="3" selected>Med</option>
+          <option value="6">Coarse</option>
+        </select>
+        <button id="focusFar" class="focus-step" title="focus farther" aria-label="focus farther">▶</button>
+      </div>
+    </div>
     <button id="shoot">Capture</button>
     <button id="record">Record</button>
     <p id="result" class="result"></p>

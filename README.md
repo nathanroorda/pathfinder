@@ -24,8 +24,8 @@ For a Pathfinder device that's already been provisioned:
 2. On your phone, join the WiFi network **Pathfinder** (password: `pathfinder`).
 3. Open `http://10.42.0.1:8080` in a browser.
 4. Plug the camera into the Pi's USB port and power it on. If the camera has a "PC Remote" / tether mode, enable it.
-5. The status line should read **Connected: \<camera model\>** within a few seconds.
-6. Adjust settings and tap **Capture** for a still, or **Record** to start/stop video.
+5. The status line should read **Connected: \<camera model\>** within a few seconds, and a live preview appears.
+6. Use **AF** / the **◀ ▶** focus nudges to focus, adjust settings, and tap **Capture** for a still or **Record** to start/stop video.
 
 ## File Layout
 
@@ -40,8 +40,8 @@ For a Pathfinder device that's already been provisioned:
 ├── setup.sh          Provisions a fresh Raspberry Pi (see "Provisioning" below)
 ├── camera/
 │   ├── __init__.py  Public interface: connect() / disconnect()
-│   ├── gp2.py       libgphoto2 backend: capture, settings, connection handling
-│   └── sony.py      Per-model quirks (shot timing, retry behavior)
+│   ├── gp2.py       libgphoto2 backend: capture, liveview, recording, focus, settings
+│   └── sony.py      Per-model quirks (timing, retry, focus widgets & modes)
 └── web/
     ├── index.html  Page shell
     ├── script.js   Status polling, capture button, settings rendering
@@ -54,9 +54,9 @@ For a Pathfinder device that's already been provisioned:
 
 ## Architecture
 
-- **`app.py` / `run.py`** — a FastAPI app exposing a small REST API (`/api/status`, `/api/connect`, `/api/capture`, `/api/record/start`, `/api/record/stop`, `/api/settings`) and serving `web/` as static files. Runs under `uvicorn`.
-- **`camera/`** — wraps the `gphoto2` Python binding. `gp2.py` handles connecting, capturing, and reading/writing settings; `sony.py` holds per-model timing/retry quirks looked up by camera model string.
-- **`web/`** — a small vanilla JS/HTML/CSS frontend. It polls `/api/status`, renders whatever settings the connected camera reports (choice/toggle/range/text controls, built dynamically from the API response), and posts changes back.
+- **`app.py` / `run.py`** — a FastAPI app exposing a small REST API (`/api/status`, `/api/connect`, `/api/capture`, `/api/liveview`, `/api/record/*`, `/api/autofocus`, `/api/focus`, `/api/settings`) and serving `web/` as static files. Runs under `uvicorn`.
+- **`camera/`** — wraps the `gphoto2` Python binding. `gp2.py` handles connecting, capturing, live preview, recording, focus, and reading/writing settings; `sony.py` holds per-model quirks (timing, retry, focus widgets & modes) looked up by camera model string.
+- **`web/`** — a small vanilla JS/HTML/CSS frontend. It shows a live preview and focus controls, renders whatever settings the connected camera reports (choice/toggle/range/text controls, built dynamically from the API response), and posts changes back.
 
 ## Provisioning a New Device
 

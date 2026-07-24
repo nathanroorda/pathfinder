@@ -82,6 +82,8 @@ All routes are declared directly on the `FastAPI()` instance in `app.py` (no rou
 | `GET` | `/api/liveview` | 503 if disconnected. Otherwise streams `multipart/x-mixed-replace` — a continuous MJPEG feed, one `cam.preview()` frame per part, that an `<img>` decodes in place. Each frame is a separate `_run_camera(cam.preview)` call, so it grabs the camera lock, pulls one frame, and releases, letting capture/record/settings interleave between frames. The generator stops when the client disconnects (`request.is_disconnected()`), when the camera drops (a 503 from `_run_camera` breaks the loop and the watcher rebuilds it), or paced by `LIVEVIEW_FRAME_INTERVAL`. |
 | `POST` | `/api/record/start` | 503 if disconnected. Sets the vendor's movie toggle widget on (`cam.set_recording(True)`), returns `{ok, recording}`. Idempotent — a no-op if already recording. 400 if the body exposes no movie widget. |
 | `POST` | `/api/record/stop` | Mirror of the above with the toggle off. Idempotent — a no-op if not recording. |
+| `POST` | `/api/autofocus` | 503 if disconnected. Triggers a one-shot autofocus via `cam.autofocus()`, first switching the body into an AF mode if needed. Returns `{ok, focusmode}` (the effective mode, or `null` if the body opts out of mode management). 400 if the body exposes no AF-drive widget. |
+| `POST` | `/api/focus` | Body `{steps}` (signed int; near = negative, far = positive). Switches the body into a manual-focus mode if needed, then nudges via `cam.manual_focus(steps)`. Returns `{ok, focusmode}`. 400 if the body exposes no manual-focus-drive widget. Both focus routes are allowed while recording (rack focus). |
 | `GET` | `/api/settings` | Returns the camera's current writable settings as a list of widget descriptors (see below). |
 | `POST` | `/api/settings/{name}` | Body `{value}` (str/int/float/bool). Sets one setting; on failure returns 400 with the underlying error; on success re-reads and returns the full settings list so the UI can pick up any settings that changed as a side effect (e.g. aperture limits shifting with ISO). |
 
@@ -95,55 +97,18 @@ have had first refusal.
 ## `camera/` package — the gphoto2 boundary
 
 `app.py` never touches the `gphoto2` binding directly; everything goes through
-`camera/`.
+`camera/`, whose public surface is just four names re-exported from `gp2` (the
+only import `app.py` makes is `import camera`): `connect()`, `disconnect()`,
+`is_disconnect_error()`, and the `CameraDisconnected` exception.
 
-- **`camera/__init__.py`** — public surface: re-exports `connect()` / `disconnect()`
-  from `gp2`. This is the only import `app.py` makes (`import camera`).
-- **`camera/gp2.py`** — the actual libgphoto2 backend.
-  - `connect()` — `gp.Camera().init()`, reads the model string off
-    `get_abilities()`, wraps it in a `Gphoto2Camera`.
-  - `Gphoto2Camera` — one instance per physical connection. Holds a
-    `threading.Lock` (`_lock`) guarding every hardware operation, since
-    `run_in_threadpool` calls execute on worker threads and could otherwise overlap
-    (e.g. a capture racing a settings write).
-  - `preview()` — grabs one liveview JPEG via `capture_preview()`; the driver
-    behind `/api/liveview`. Runs under `_lock` and refuses while recording.
-  - `set_recording(on)` — starts/stops movie recording by writing the vendor's
-    movie toggle widget (`_quirks["movie_widget"]`, default `"movie"`) with
-    `set_config()`. Guarded by `_lock`; idempotent (compares against the tracked
-    `recording` flag and no-ops if already in the requested state). The `recording`
-    attribute is written here under the lock but read lock-free by `/api/status` —
-    safe because a lone bool read/write is atomic under the GIL, so only the
-    check-then-act needs the lock. The movie widget lives in gphoto2's `actions`
-    section, which `INCLUDE_SECTIONS` excludes, so it never appears as a settings row.
-  - `capture()`:
-    1. Enforces `shot_gap` — a per-model minimum interval since the last shot,
-       sleeping out the remainder if called too soon.
-    2. `_drain_events()` — flushes any pending camera events before shooting, since
-       stale queued events can interfere with the capture call on some bodies.
-    3. `_capture_with_retry()` — retries up to `capture_retry_attempts` times on
-       `GP_ERROR`, with a 1s backoff and another event drain between attempts.
-    4. Downloads the resulting file to `CAPTURE_DIR` (env
-       `PATHFINDER_CAPTURE_DIR`, default `captures/`), prefixed with a unix
-       timestamp to avoid collisions.
-  - `list_settings()` — walks the camera's config tree (`get_config()`), descending
-    into `WINDOW`/`SECTION` nodes (`_walk`), keeping only widgets under
-    `INCLUDE_SECTIONS = {imgsettings, capturesettings, settings}` whose type is one
-    Pathfinder knows how to render (`_KIND`: radio/menu → `choice`, toggle →
-    `toggle`, range → `range`, text → `text`) and that aren't read-only. This is
-    what makes the UI camera-agnostic — whatever widgets the connected body exposes
-    in those sections become the settings panel.
-  - `set_setting(name, value)` — looks up the widget by name, coerces `value` to the
-    type gphoto2 expects for that widget (`_coerce`: range → `float`, toggle →
-    `int`, else `str`), writes it back with `set_config()`.
-- **`camera/sony.py`** — per-model quirk table. `quirks(model)` returns
-  `{shot_gap, capture_retry_attempts}` merged from a `GENERAL` Sony default and any
-  model-specific override in `MODELS` (currently only `ILCE-7M4` / α7 IV, with no
-  overrides beyond the general Sony numbers). `gp2._quirks_for(model)` checks each
-  module in `VENDORS = [sony]` in order and falls back to
-  `DEFAULT_QUIRKS = {shot_gap: 0.0, capture_retry_attempts: 1}` for anything
-  unrecognized. Adding a new vendor means adding a module with a `quirks(model)`
-  function and listing it in `VENDORS`.
+`connect()` returns a `Gphoto2Camera` — one instance per physical connection that
+holds a `threading.Lock` guarding **every** hardware op (capture, preview, focus,
+recording, settings), because `run_in_threadpool` runs them on worker threads that
+would otherwise overlap inside libgphoto2. The methods `app.py` calls (`capture`,
+`preview`, `set_recording`, `autofocus`, `manual_focus`, `list_settings`,
+`set_setting`) and the per-model quirk resolution in `sony.py` are documented in
+depth in **`camera.md`** — this section is only the app-facing boundary, not a
+repeat of that.
 
 ## Concurrency model, summarized
 

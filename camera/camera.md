@@ -48,7 +48,8 @@ The object owns the live `gphoto2` handle (`_cam`) and all state tied to it. Two
 design points drive everything else in the class:
 
 **1. One lock guards every hardware op.** `_lock` (a `threading.Lock`) wraps the
-body of `capture`, `set_recording`, `list_settings`, `set_setting`, and `close`.
+body of `capture`, `preview`, `set_recording`, `autofocus`, `manual_focus`,
+`list_settings`, `set_setting`, and `close`.
 This matters because `app.py` runs these on threadpool workers — without the
 lock, a capture and a settings write could execute inside libgphoto2
 concurrently, which the binding doesn't tolerate. `_require_open()` (called at the
@@ -102,6 +103,75 @@ Idempotent: compares against the tracked `recording` flag and returns early if
 already in the requested state. The movie widget lives in gphoto2's `actions`
 config section, which `INCLUDE_SECTIONS` deliberately excludes, so it never shows
 up as a settings row in the UI — recording is a button, not a setting.
+
+### `autofocus()` / `manual_focus(steps)`
+
+Two focus commands that both funnel through the private `_drive_action(name,
+value)` helper. `autofocus()` writes the vendor's **AF-drive widget**
+(`_quirks["af_widget"]` — `"autofocus"` on Sony, `"autofocusdrive"` for an
+unknown body) to trigger a one-shot autofocus; `manual_focus(steps)` writes the
+**manual-focus-drive widget** (`_quirks["manual_focus_widget"]` — `"manualfocus"`
+on Sony, `"manualfocusdrive"` otherwise) with a signed step count — negative drives focus nearer, positive farther, and magnitude sets
+how far. On the α7 IV `manualfocus` is a `RANGE` of `-7..7` (idle `0`); the
+frontend maps its Fine/Med/Coarse selector to `1`/`3`/`6` to spread across that
+travel. The direction sign and step magnitudes are body-specific; if a new body
+focuses the wrong way, swap the sign at the call site or adjust the quirk — no
+change here.
+
+`autofocus()` writes the sequence in the `af_drive_values` quirk to `af_widget`,
+one `_drive_action` (fresh-config edge) per value. The generic default is a
+single `(1,)`; Sony overrides it with `(1, 0)` — a **press/release**, because the
+α7 IV `autofocus` toggle idles at `2` and a lone `1` would leave the shutter in an
+AF-lock half-press. Press (1) runs AF, release (0) completes the one-shot, and
+under AF-S the body keeps focus locked at the distance it found. Keeping the
+sequence in data (not hardcoded here) is what stops Sony's protocol from being
+imposed on a generic body, where an unconditional `0` could cancel the AF the `1`
+just started.
+
+**Focus-mode gating — `_ensure_focus_mode(acceptable, target)`.** A focus command
+is accepted over PTP but silently ignored if the body is in the wrong mode:
+`manualfocus` only drives the motor in `Manual` (and possibly `DMF`), and
+`autofocus` only fires outside `Manual`. So each action first ensures the mode.
+This is a **guarded read-modify-write against the body's `focusmode` register**,
+run inside the caller's already-held `_lock` so the read/decide/switch is atomic
+with respect to every other camera op (the same reason you'd wrap a non-atomic
+RMW on an ISR-shared register in a critical section). `acceptable` is a *set* of
+modes, not one value: if the live mode is already in it, the helper returns
+without writing — idempotent, and it leaves the user's own `AF-C`/`DMF` choice
+alone. Only when the mode is unacceptable does it switch to `target`. It returns
+the effective mode (which `autofocus`/`manual_focus` return on up to `app.py`, so
+the API can report it and the UI can refresh the now-stale `focusmode` row), or
+`None` when the body opts out of mode management (`focus_mode_widget` is `None`).
+
+The mode is **latched, not restored**: the buttons express intent, so the body
+stays in the mode the last focus action needed rather than being reverted.
+
+Both widgets live in gphoto2's `actions` section (excluded from
+`INCLUDE_SECTIONS`), so like `movie` they're driven directly, never shown as
+settings rows — focus is a button, not a stored setting.
+
+`_drive_action` uses the **single-config** path — `get_single_config(name)` →
+`set_value` (coerced by `_coerce` to the widget's gphoto2 type) →
+`set_single_config(name, widget)`. This is an **efficiency choice, not a
+requirement**: single-config reads and writes just the one property, whereas the
+whole-tree `get_config()`/`set_config()` that `set_setting` uses round-trips the
+entire config over PTP — wasteful for a focus nudge that may fire rapidly. The
+full tree works on these action widgets too (verified), so this is purely about
+cost. Re-reading the widget per call also means each write starts from its live
+value, so it's a real edge that re-fires the momentary action rather than a no-op
+— the software analog of edge-triggering a shutter line.
+
+> **History (so the `-2` ghost doesn't come back):** a long bug hunt blamed the
+> `single-config`↔`full-tree` distinction — the theory was that action widgets
+> *needed* single-config and `focusmode` *needed* the tree. That was wrong. The
+> `-2 Bad parameters` was always a **wrong widget name**: the α7 IV's model string
+> didn't match `MODELS`, so quirks fell back to `DEFAULT_QUIRKS`, whose generic
+> `"autofocusdrive"` doesn't exist on the body (see the `sony.py` section). Both
+> config APIs work on both widget kinds; the mechanism was never the problem.
+
+Unlike `capture`/`preview`, these are **not** gated on `self.recording`: they're
+plain config writes (as `set_setting` is), and driving focus mid-recording is a
+deliberate use case (rack focus during video).
 
 ### `preview()`
 
@@ -176,30 +246,62 @@ identically forever — is documented in **`app.md`**.
 
 ## `sony.py` — per-model quirks
 
-A small data module with no hardware calls. `quirks(model)` returns `None` if the
-model isn't listed, otherwise a dict built by merging model-specific overrides in
-`MODELS` on top of the `GENERAL` Sony defaults:
+A small data module with no hardware calls. `quirks(model)` returns `None` for a
+**non-Sony** body (`"sony"` not in the model string), and otherwise a dict built
+by layering any matching `MODELS` override on top of the `GENERAL` Sony defaults.
+
+**Match on what gphoto2 actually reports, by substring.** `connect()` feeds
+`quirks()` the `get_abilities().model` string — for the α7 IV that's
+`"Sony Alpha-A7 IV (PC Control)"`, **not** the USB/internal `"ILCE-7M4"` name.
+Two rules follow, and both are why a `-2` "bad parameters" haunted the focus
+buttons before this was fixed:
+
+- **Sony detection is `"sony" in model.lower()`**, so *any* Sony body inherits
+  `GENERAL` (correct focus widget names, etc.) even if it has no `MODELS` entry.
+  The old exact-match-on-`"ILCE-7M4"` fell through to `DEFAULT_QUIRKS`, whose
+  generic-PTP `"autofocusdrive"`/`"manualfocusdrive"` names **don't exist on the
+  body** — so every focus write hit `get_single_config("autofocusdrive")` → `-2`.
+- **`MODELS` keys are matched as substrings** (`key.lower() in model.lower()`),
+  which tolerates the varying suffixes gphoto2 appends (`(Control)` vs
+  `(PC Control)`, firmware revisions). Hence the α7 IV key is `"A7 IV"`, a token
+  that appears in the reported string — not the internal name that never does.
+
+The quirk keys:
 
 | key | meaning | `GENERAL` (Sony) | `DEFAULT_QUIRKS` (unknown body) |
 |---|---|---|---|
 | `shot_gap` | min seconds between stills | `1.5` | `0.0` |
 | `capture_retry_attempts` | tries on a generic `GP_ERROR` | `2` | `1` |
 | `movie_widget` | config name of the movie toggle | `"movie"` | `"movie"` |
+| `af_widget` | config name of the AF-drive action | `"autofocus"` | `"autofocusdrive"` |
+| `af_drive_values` | value sequence written to `af_widget` per trigger | `(1, 0)` (press/release) | `(1,)` |
+| `manual_focus_widget` | config name of the manual-focus-drive action | `"manualfocus"` | `"manualfocusdrive"` |
+| `focus_mode_widget` | config name of the focus-mode selector (`None` = don't manage mode) | `"focusmode"` | `None` |
+| `af_modes` | modes in which `autofocus` fires (no switch if already one) | `("Automatic", "AF-A", "AF-C", "AF-S", "DMF")` | `()` |
+| `af_target_mode` | mode to switch to for AF when outside `af_modes` | `"AF-A"` | `None` |
+| `mf_modes` | modes in which `manualfocus` drives the motor | `("Manual",)` | `()` |
+| `mf_target_mode` | mode to switch to for manual focus when outside `mf_modes` | `"Manual"` | `None` |
 
 `gp2._quirks_for(model)` walks each module in `VENDORS = [sony]` in order, taking
 the first non-`None` result, and falls back to `DEFAULT_QUIRKS` for anything
 unrecognized. So an untuned camera still works — just with conservative timing and
-a single capture attempt.
+a single capture attempt. It **logs which path it took** — `INFO "matched vendor
+quirks for model …"` on a hit, `WARNING "no vendor quirks matched …"` on the
+fallback — because a *silent* fallback to generic widget names is exactly what
+made the focus `-2` so hard to find. If focus misbehaves on a new body, that
+warning line is the first thing to check.
 
 **Adding a vendor:** create a module exposing a `quirks(model)` function with the
 same contract and append it to `VENDORS`. **Adding a model to an existing
-vendor:** add an entry to that vendor's `MODELS` (empty dict = "use the vendor
-defaults", which is what the α7 IV / `ILCE-7M4` currently does). No changes to
-`gp2.py` are needed for either.
+vendor:** add an entry to that vendor's `MODELS` keyed by a distinctive substring
+of the *reported* model string (check it with `GET /api/status` or
+`get_abilities().model` — don't assume the internal name); an empty dict means
+"use the vendor defaults," which is what the α7 IV (`"A7 IV"`) currently does. No
+changes to `gp2.py` are needed for either.
 
 ## Logging
 
 All modules here log through a per-module `logging.getLogger(__name__)` and never
 configure handlers themselves — records propagate to the root logger set up by
-`log.py`. See **`log.md`** for the logging architecture and how to raise the level
-to `DEBUG` to see the capture-retry and reconnect breadcrumbs.
+`log.py`. See **`log.md`** for the logging architecture; the `DEBUG` level (the
+current default) is what surfaces the capture-retry and reconnect breadcrumbs.

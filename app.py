@@ -21,6 +21,10 @@ class SettingValue(BaseModel):
     value: str | int | float | bool
 
 
+class FocusStep(BaseModel):
+    steps: int
+
+
 def _try_connect(app: FastAPI) -> None:
     try:
         app.state.camera = camera.connect()
@@ -187,6 +191,32 @@ async def record_start():
 @app.post("/api/record/stop")
 async def record_stop():
     return await _set_recording(False)
+
+
+@app.post("/api/autofocus")
+async def autofocus():
+    cam = _require_camera()
+    try:
+        mode = await _run_camera(cam.autofocus)
+    except HTTPException:
+        raise  # disconnect (503)
+    except Exception as exc:
+        log.warning("autofocus failed: %r", exc, exc_info=True)
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "focusmode": mode}
+
+
+@app.post("/api/focus")
+async def manual_focus(body: FocusStep):
+    cam = _require_camera()
+    try:
+        mode = await _run_camera(cam.manual_focus, body.steps)
+    except HTTPException:
+        raise  # disconnect (503)
+    except Exception as exc:
+        log.warning("manual_focus(%d) failed: %r", body.steps, exc, exc_info=True)
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "focusmode": mode}
 
 
 @app.get("/api/settings")

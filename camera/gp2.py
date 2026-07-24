@@ -11,7 +11,19 @@ log = logging.getLogger(__name__)
 
 CAPTURE_DIR = os.environ.get("PATHFINDER_CAPTURE_DIR", "captures")
 
-DEFAULT_QUIRKS = {"shot_gap": 0.0, "capture_retry_attempts": 1, "movie_widget": "movie"}
+DEFAULT_QUIRKS = {
+    "shot_gap": 0.0,
+    "capture_retry_attempts": 1,
+    "movie_widget": "movie",
+    "af_widget": "autofocusdrive",
+    "af_drive_values": (1,),
+    "manual_focus_widget": "manualfocusdrive",
+    "focus_mode_widget": None,
+    "af_modes": (),
+    "af_target_mode": None,
+    "mf_modes": (),
+    "mf_target_mode": None,
+}
 VENDORS = [sony]
 
 _KIND = {
@@ -126,6 +138,42 @@ class Gphoto2Camera:
             self.recording = on
             return self.recording
 
+    def autofocus(self):
+        with self._lock:
+            self._require_open()
+            mode = self._ensure_focus_mode(
+                self._quirks["af_modes"], self._quirks["af_target_mode"])
+            af = self._quirks["af_widget"]
+            for value in self._quirks["af_drive_values"]:
+                self._drive_action(af, value)
+            return mode
+
+    def manual_focus(self, steps):
+        with self._lock:
+            self._require_open()
+            mode = self._ensure_focus_mode(
+                self._quirks["mf_modes"], self._quirks["mf_target_mode"])
+            self._drive_action(self._quirks["manual_focus_widget"], steps)
+            return mode
+
+    def _ensure_focus_mode(self, acceptable, target):
+        name = self._quirks["focus_mode_widget"]
+        if not name or not target:
+            return None
+        cfg = self._cam.get_config()
+        widget = cfg.get_child_by_name(name)
+        current = widget.get_value()
+        if current in acceptable:
+            return current
+        widget.set_value(target)
+        self._cam.set_config(cfg)
+        return target
+
+    def _drive_action(self, widget_name, value):
+        widget = self._cam.get_single_config(widget_name)
+        widget.set_value(_coerce(widget.get_type(), value))
+        self._cam.set_single_config(widget_name, widget)
+
     def list_settings(self):
         with self._lock:
             self._require_open()
@@ -184,7 +232,11 @@ def _quirks_for(model):
     for vendor in VENDORS:
         q = vendor.quirks(model)
         if q is not None:
+            log.info("matched vendor quirks for model %r", model)
             return q
+    log.warning(
+        "no vendor quirks matched model %r — using generic defaults; "
+        "vendor-specific actions (focus, etc.) may not work", model)
     return DEFAULT_QUIRKS
 
 

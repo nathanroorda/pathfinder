@@ -17,14 +17,15 @@ documented in **`camera.md`**.
 
 - **`index.html`** — the page shell. A single `<main>` with the elements the
   script drives by `id`: `#status` (connection line), `#liveview` (the preview
-  box, wrapping the `#preview` `<img>` the MJPEG stream feeds), `#shoot` (Capture
-  button), `#record` (Record/Stop button), `#result` (last-action feedback), and
-  `#settings` (the dynamic settings panel). The liveview sits directly above the
-  two buttons. Loads `style.css` in `<head>` and
+  box, wrapping the `#preview` `<img>` the MJPEG stream feeds), `#focus` (the
+  focus control group: `#af` plus `#focusNear`/`#focusStep`/`#focusFar`), `#shoot`
+  (Capture button), `#record` (Record/Stop button), `#result` (last-action
+  feedback), and `#settings` (the dynamic settings panel). The liveview sits
+  directly above the focus group and the two buttons. Loads `style.css` in `<head>` and
   `script.js` at the end of `<body>`. The favicon is a `data:,` no-op so the
   browser doesn't fire a 404 for `/favicon.ico`.
-- **`script.js`** — all behavior: status polling, the two capture buttons, and
-  dynamic settings rendering.
+- **`script.js`** — all behavior: status polling, the liveview stream, the
+  capture/record and focus controls, and dynamic settings rendering.
 - **`style.css`** — styling only; no logic. Mobile-first, single-column, and
   theme-aware.
 
@@ -109,6 +110,33 @@ just a nicer front door.)
 > (`net::ERR_BLOCKED_BY_CLIENT`). Capture is unaffected. If you rename these
 > routes, avoid `record`/`track`/`analytics`-style tokens, and update both
 > `app.py` and the fetch URLs here.
+
+### Focus controls
+
+Sits right under the liveview (where you're framing) and is the client half of
+the `/api/autofocus` and `/api/focus` routes:
+
+- **`#af`** → `POST /api/autofocus`, a one-shot autofocus.
+- **`#focusNear` / `#focusFar`** → `POST /api/focus` with `{steps}` from the
+  shared `driveFocus(steps)` helper. Sign encodes direction (near = negative,
+  far = positive) and the `#focusStep` `<select>` (Fine/Med/Coarse → `1`/`3`/`6`,
+  within the body's `-7..7` `manualfocus` range) sets magnitude, so `focusNear`
+  sends `-step` and `focusFar` sends `+step`.
+
+Unlike `#shoot`, these are **not** disabled while recording — the backend permits
+focus writes mid-take (rack focus), so the UI leaves them live. Like the other
+buttons they don't self-disable on disconnect; a click while offline just surfaces
+the backend's 503 in `#result`.
+
+Because the backend may switch the body's focus mode to reach the motor (AF needs
+an AF mode, the nudge needs Manual — see **`camera.md`**), a focus action can leave
+the settings panel's `focusmode` row stale. On success both handlers call
+`scheduleSettingsRefresh()`, a **debounced** (`400ms`) `loadSettings()` — a burst
+of nudges coalesces into one reload, and it's a *generic* settings re-fetch rather
+than reaching in to patch a named widget, so the frontend keeps its no-camera-
+knowledge invariant. (The endpoints also return the effective `focusmode`, but the
+client ignores it for exactly that reason — using it would mean hardcoding the
+widget name here.)
 
 ### Dynamic settings rendering
 

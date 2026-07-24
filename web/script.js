@@ -5,6 +5,10 @@ const recordBtn = document.getElementById("record");
 const settingsEl = document.getElementById("settings");
 const liveviewEl = document.getElementById("liveview");
 const previewImg = document.getElementById("preview");
+const afBtn = document.getElementById("af");
+const focusNearBtn = document.getElementById("focusNear");
+const focusFarBtn = document.getElementById("focusFar");
+const focusStepEl = document.getElementById("focusStep");
 
 async function api(url, opts) {
   const r = await fetch(url, opts);
@@ -89,6 +93,51 @@ recordBtn.addEventListener("click", async () => {
     recordBtn.disabled = false;
   }
 });
+
+// Focus controls. AF triggers a one-shot autofocus; the ◀/▶ buttons nudge focus
+// by a signed step count (near = negative, far = positive). These are momentary
+// action-widget writes on the body — allowed during recording too, so you can
+// rack focus mid-take, which is why they aren't gated on the recording flag.
+//
+// The backend may switch the body's focus mode to reach the motor (AF needs an
+// AF mode, the nudge needs Manual), which makes the settings panel's focusmode
+// row stale. We reconcile with a *generic*, debounced settings refresh — kept
+// camera-agnostic (no hardcoded widget name) and coalesced so a burst of nudges
+// triggers one reload, not one per press.
+let settingsRefreshTimer;
+function scheduleSettingsRefresh() {
+  clearTimeout(settingsRefreshTimer);
+  settingsRefreshTimer = setTimeout(loadSettings, 400);
+}
+
+afBtn.addEventListener("click", async () => {
+  resultEl.textContent = "Focusing…";
+  try {
+    await api("/api/autofocus", { method: "POST" });
+    resultEl.textContent = "Focused ✓";
+    scheduleSettingsRefresh();
+  } catch (e) {
+    resultEl.textContent = `Error: ${e.message}`;
+  }
+});
+
+async function driveFocus(steps) {
+  resultEl.textContent = "Focusing…";
+  try {
+    await api("/api/focus", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ steps }),
+    });
+    resultEl.textContent = "Focus moved ✓";
+    scheduleSettingsRefresh();
+  } catch (e) {
+    resultEl.textContent = `Error: ${e.message}`;
+  }
+}
+
+focusNearBtn.addEventListener("click", () => driveFocus(-Number(focusStepEl.value)));
+focusFarBtn.addEventListener("click", () => driveFocus(+Number(focusStepEl.value)));
 
 const settingRenderers = {
   choice: (setting, apply) => {

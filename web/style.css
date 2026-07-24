@@ -55,6 +55,17 @@ button:disabled { opacity: .4; cursor: default; }
 #record { margin-top: .6rem; }
 #record.recording { color: #c2453f; }
 
+.focus { display: flex; gap: .6rem; margin: 0 0 1rem; }
+.focus button { width: auto; padding: .6rem; font-size: 1rem; }
+.focus-af { flex: 1 1 auto; }
+.focus-drive { flex: 1 1 auto; display: flex; gap: .4rem; }
+.focus-drive .focus-step { flex: 0 0 auto; min-width: 3rem; }
+.focus-drive select {
+  flex: 1 1 auto; min-width: 4rem; text-align: center; padding: .4rem;
+  font-size: .95rem; border-radius: .7rem; border: 1px solid currentColor;
+  background: transparent; color: inherit;
+}
+
 .result { min-height: 1.2rem; margin: 1rem 0 0; opacity: .7; font-size: .9rem; }
 
 .settings { margin-top: 1.75rem; display: grid; gap: .8rem; text-align: left; }
