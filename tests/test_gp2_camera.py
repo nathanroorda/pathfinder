@@ -40,8 +40,22 @@ class CameraTestCase(unittest.TestCase):
     def driven(self):
         return [(c[1], c[2]) for c in self.device.calls_named("set_single_config")]
 
+    def writes_of(self, widget, value):
+        return [d for d in self.driven() if d == (widget, value)]
+
     def methods(self):
         return [c[0] for c in self.device.calls]
+
+    def fail_writes(self, widget, value, times, error=None):
+        error = error or gp.GPhoto2Error(gp.GP_ERROR_IO_WRITE)
+        remaining = [times]
+
+        def hook(method, *args):
+            if (method == "set_single_config" and args[0] == widget
+                    and args[1] == value and remaining[0]):
+                remaining[0] -= 1
+                raise error
+        self.device.hook = hook
 
 
 class Capture(CameraTestCase):
@@ -169,10 +183,15 @@ class CaptureRetry(CameraTestCase):
 
 
 class Bulb(CameraTestCase):
-    def _deliver_image_on_release(self):
+    def _deliver_image_on_release(self, after_failures=0):
         # Queued only on release; a pre-queued event would be eaten by the pre-exposure drain.
+        remaining = [after_failures]
+
         def hook(method, *args):
             if method == "set_single_config" and args[0] == "bulb" and args[1] == 0:
+                if remaining[0]:
+                    remaining[0] -= 1
+                    raise gp.GPhoto2Error(gp.GP_ERROR_IO_WRITE)
                 self.device.events.append((gp.GP_EVENT_FILE_ADDED, gp.CameraFilePath()))
         self.device.hook = hook
 
@@ -195,11 +214,62 @@ class Bulb(CameraTestCase):
         self.assertEqual(self.device.value_of("bulb"), 0)
         self.assertEqual(self.driven(), [("bulb", 1), ("bulb", 0)])
 
+    def test_shutter_release_is_retried_after_a_transient_write_failure(self):
+        self._deliver_image_on_release(after_failures=1)
+
+        path = self.cam.bulb(2.0, save_dir=self.save_dir)
+
+        self.assertEqual(self.device.value_of("bulb"), 0)
+        self.assertEqual(len(self.writes_of("bulb", 0)), 2)
+        self.assertTrue(os.path.isfile(path))
+
+    def test_a_release_that_never_lands_raises_the_transport_error(self):
+        self._deliver_image_on_release(after_failures=99)
+
+        with self.assertRaises(gp.GPhoto2Error) as caught:
+            self.cam.bulb(1.0, save_dir=self.save_dir)
+
+        self.assertTrue(gp2.is_disconnect_error(caught.exception))
+        self.assertEqual(len(self.writes_of("bulb", 0)), gp2.RELEASE_ATTEMPTS)
+
+    def test_a_release_that_never_lands_is_logged_as_an_error(self):
+        self._deliver_image_on_release(after_failures=99)
+
+        with self.assertLogs("camera.gp2", level="ERROR") as captured:
+            with self.assertRaises(gp.GPhoto2Error):
+                self.cam.bulb(1.0, save_dir=self.save_dir)
+
+        self.assertIn("latched", "\n".join(captured.output))
+
+    def test_an_interrupted_exposure_keeps_its_own_error_when_the_release_fails(self):
+        self._deliver_image_on_release(after_failures=99)
+        real_sleep = self.clock.sleep
+
+        def sleep(seconds):
+            if seconds == 4.0:
+                raise KeyboardInterrupt
+            real_sleep(seconds)
+
+        self.clock.sleep = sleep
+
+        with self.assertRaises(KeyboardInterrupt):
+            self.cam.bulb(4.0, save_dir=self.save_dir)
+
     def test_readout_timeout_reports_failure_with_the_shutter_closed(self):
         with self.assertRaisesRegex(RuntimeError, "no image"):
             self.cam.bulb(2.0, save_dir=self.save_dir)
 
         self.assertEqual(self.device.value_of("bulb"), 0)
+
+    def test_readout_waits_out_the_exposure_plus_a_margin(self):
+        start = self.clock.monotonic()
+
+        with self.assertRaises(RuntimeError):
+            self.cam.bulb(60.0, save_dir=self.save_dir)
+
+        readout = self.clock.monotonic() - start - 60.0
+        self.assertGreater(readout, 60.0)
+        self.assertLess(readout, 60.0 + gp2.BULB_READOUT_MARGIN + 1.0)
 
     def test_readout_polling_is_bounded(self):
         start = self.clock.monotonic()
@@ -207,7 +277,8 @@ class Bulb(CameraTestCase):
         with self.assertRaises(RuntimeError):
             self.cam.bulb(1.0, save_dir=self.save_dir)
 
-        self.assertLess(self.clock.monotonic() - start, 20.0)
+        self.assertLess(self.clock.monotonic() - start,
+                        1.0 + 1.0 + gp2.BULB_READOUT_MARGIN + 1.0)
 
     def test_unsupported_on_a_body_with_no_bulb_widget(self):
         cam = gp2.Gphoto2Camera(self.device, GENERIC)
@@ -327,6 +398,31 @@ class Autofocus(CameraTestCase):
         self.assertIsNone(mode)
         self.assertEqual(self.driven(), [("autofocusdrive", 1)])
         self.assertEqual(self.device.calls_named("set_config"), [])
+
+    def test_release_is_retried_after_a_transient_write_failure(self):
+        self.fail_writes("autofocus", 0, times=1)
+
+        self.cam.autofocus()
+
+        self.assertEqual(self.device.value_of("autofocus"), 0)
+        self.assertEqual(len(self.writes_of("autofocus", 0)), 2)
+
+    def test_a_release_that_never_lands_raises_the_transport_error(self):
+        self.fail_writes("autofocus", 0, times=99)
+
+        with self.assertRaises(gp.GPhoto2Error) as caught:
+            self.cam.autofocus()
+
+        self.assertTrue(gp2.is_disconnect_error(caught.exception))
+        self.assertEqual(len(self.writes_of("autofocus", 0)), gp2.RELEASE_ATTEMPTS)
+
+    def test_a_failed_press_still_attempts_the_release(self):
+        self.fail_writes("autofocus", 1, times=99)
+
+        with self.assertRaises(gp.GPhoto2Error):
+            self.cam.autofocus()
+
+        self.assertEqual(len(self.writes_of("autofocus", 0)), 1)
 
     def test_refused_after_close(self):
         self.cam.close()

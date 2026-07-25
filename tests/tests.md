@@ -1,6 +1,6 @@
 # Testing
 
-Pathfinder's test suite: 222 tests, `unittest` only, no third-party test
+Pathfinder's test suite: 228 tests, `unittest` only, no third-party test
 dependencies, and **no camera required**. The whole camera layer runs against a
 fake libgphoto2, so the suite is a normal edit-run-edit loop on a laptop rather
 than something you can only do at the rig.
@@ -22,12 +22,12 @@ tests/
 │   └── fake_camera.py    in-memory device, widget tree, and app-layer double
 ├── test_sony_quirks.py     9   vendor/model quirk resolution
 ├── test_gp2_helpers.py    30   coercion, clamping, describe, disconnect codes
-├── test_gp2_camera.py     78   Gphoto2Camera against a fake device
+├── test_gp2_camera.py     86   Gphoto2Camera against a fake device
 ├── test_app_models.py     25   request validation + the bulb ceiling
 ├── test_app_routes.py     52   routes, error mapping, connection state machine
 ├── test_web_contract.py    9   web/ ↔ app.py seams (static text checks)
 ├── test_fake_fidelity.py  13   does the double still resemble the real thing
-└── test_known_gaps.py      6   TODO.md hazards, as expected-to-fail tests
+└── test_known_gaps.py      4   TODO.md hazards, as expected-to-fail tests
 ```
 
 ## Running it
@@ -50,12 +50,12 @@ handles that for you.
 
 The dev machine has no pip, no venv, and no `gphoto2`/`fastapi`, so **77 tests
 skip there** — everything that needs FastAPI or pydantic — plus the 5 that
-compare the fake against the real binding. The remaining 140 execute, including
+compare the fake against the real binding. The remaining 146 execute, including
 the entire camera layer:
 
 ```
-Ran 222 tests in 0.13s
-OK (skipped=82, expected failures=6)
+Ran 228 tests in 0.14s
+OK (skipped=82, expected failures=4)
 ```
 
 To run the whole suite, use the Pi's venv (created by `setup.sh`), which has the
@@ -87,9 +87,9 @@ Three properties are deliberate:
 
 - **The fake is installed unconditionally**, even on the Pi where the real
   binding exists. A unit test run must never depend on what is plugged in.
-- **`fake_gphoto2.Camera().init()` always raises.** Nothing can fall through a
-  missing mock into a real USB handshake; a test that reaches it fails loudly
-  instead of quietly talking to hardware.
+- **`fake_gphoto2.Camera()` always raises.** Nothing can fall through a missing
+  mock into a real USB handshake; a test that reaches it fails loudly instead of
+  quietly talking to hardware.
 - **Every constant is the real libgphoto2 value**, not an invented one, and
   `test_fake_fidelity.py` checks that against the genuine binding whenever one is
   installed. A fake with a wrong widget-type number would let tests pass on a
@@ -143,9 +143,26 @@ are invisible until a specific body is plugged into a device with no screen.
 shutter closed, including an interrupted exposure and a readout timeout. The
 mutex is verified *held* across the exposure — that is why an unbounded `seconds`
 was a device lockup rather than a long wait. Every operation refuses a closed
-connection instead of driving a dead handle. The readout poll is bounded rather
-than spinning on the bus. Shutdown stops recording before it disconnects, so a
-service restart can't leave the body filling the card.
+connection instead of driving a dead handle. Shutdown stops recording before it
+disconnects, so a service restart can't leave the body filling the card.
+
+**Release edges get more than one chance.** The writes that return the shutter
+and the AF toggle to rest are the ones that latch hardware if they never land, so
+they retry (`RELEASE_ATTEMPTS`) and, if they still fail, raise the transport error
+so the app drops and rebuilds the connection rather than reporting success. Two
+properties are pinned separately: a *transient* failure is retried and the widget
+ends at rest, and a *permanent* one surfaces loudly — with an ERROR log naming the
+latched widget — instead of being swallowed. Note the second is the limit of what
+software can do: if the bus is gone, no retry closes the shutter. A failure during
+the exposure itself keeps its own exception rather than being masked by the
+release's.
+
+**The readout window scales with the exposure.** Long-exposure NR shoots a
+matching dark frame, so a 60s bulb can take another ~60s before the file appears;
+a fixed timeout would report failure on every long exposure while the frame
+quietly landed on the card. The deadline is `seconds + BULB_READOUT_MARGIN`, and
+tests pin both that it scales and that it still terminates rather than spinning on
+the bus holding the mutex.
 
 **Writes reach the body correctly typed and in order.** `_coerce` is the boundary
 between JSON and libgphoto2's C types, and a float where an int belongs is
@@ -191,8 +208,6 @@ written while the hazard was understood rather than months later.
 
 | Test | TODO | Asserts |
 |---|---|---|
-| `test_bulb_release_survives_a_failed_write` | #2 | If the shutter-release write fails, the shutter still ends closed. Today it gets exactly one attempt in a `finally`; a USB glitch on that write leaves the shutter physically open and the new exception masks the original. |
-| `test_af_release_survives_a_failed_write` | #4 | Same shape one layer down: a failed release leaves the AF toggle latched at 1, which keeps the lens hunting and blocks the next capture. |
 | `test_manual_focus_is_clamped_to_the_widget_range` | #5 | A focus step is clamped to the widget's declared range. `manualfocus` declares −7..7; `FocusStep` accepts any int and nothing narrows it, so `{"steps": 100000}` is driven verbatim at the motor. |
 | `test_settings_cannot_write_action_widgets` | #6 | The settings write path is scoped to the sections the read path exposes. Today `set_setting` resolves against the whole tree, so `POST /api/settings/bulb {"value": 1}` opens the shutter through an endpoint meant to be inert. |
 | `test_a_vendor_table_need_not_repeat_every_default` | #13 | A vendor table missing a key still yields a complete quirk set. Today `_quirks_for` returns the vendor dict as-is, so an omission is a `KeyError` inside a request handler on someone else's camera. |

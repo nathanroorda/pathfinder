@@ -1,4 +1,3 @@
-import contextlib
 import shutil
 import tempfile
 import types
@@ -24,34 +23,6 @@ class KnownGapTestCase(unittest.TestCase):
         self.cam = gp2.Gphoto2Camera(self.device, A7IV)
         self.save_dir = tempfile.mkdtemp(prefix="pathfinder-gap-")
         self.addCleanup(shutil.rmtree, self.save_dir, ignore_errors=True)
-
-    def fail_write_to(self, widget, value, error=None):
-        error = error or gp.GPhoto2Error(gp.GP_ERROR_IO_WRITE)
-
-        def hook(method, *args):
-            if method == "set_single_config" and args[0] == widget and args[1] == value:
-                raise error
-        self.device.hook = hook
-
-
-class ShutterSafety(KnownGapTestCase):
-    @unittest.expectedFailure  # TODO.md #2
-    def test_bulb_release_survives_a_failed_write(self):
-        self.fail_write_to("bulb", 0)
-
-        with contextlib.suppress(Exception):
-            self.cam.bulb(1.0, save_dir=self.save_dir)
-
-        self.assertEqual(self.device.value_of("bulb"), 0)
-
-    @unittest.expectedFailure  # TODO.md #4
-    def test_af_release_survives_a_failed_write(self):
-        self.fail_write_to("autofocus", 0)
-
-        with contextlib.suppress(Exception):
-            self.cam.autofocus()
-
-        self.assertEqual(self.device.value_of("autofocus"), 0)
 
 
 class RangeClamping(KnownGapTestCase):

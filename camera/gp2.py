@@ -1,3 +1,4 @@
+import contextlib
 import logging
 import os
 import threading
@@ -10,6 +11,10 @@ from . import sony
 log = logging.getLogger(__name__)
 
 CAPTURE_DIR = os.environ.get("PATHFINDER_CAPTURE_DIR", "captures")
+
+RELEASE_ATTEMPTS = 3
+RELEASE_RETRY_DELAY = 0.2
+BULB_READOUT_MARGIN = 15.0
 
 DEFAULT_QUIRKS = {
     "shot_gap": 0.0,
@@ -113,9 +118,13 @@ class Gphoto2Camera:
             self._drive_action(widget, 1)
             try:
                 time.sleep(seconds)
-            finally:
-                self._drive_action(widget, 0)
-            path = self._wait_for_image()
+            except BaseException:
+                # Keep the original failure; _release_action logs its own.
+                with contextlib.suppress(Exception):
+                    self._release_action(widget, 0)
+                raise
+            self._release_action(widget, 0)
+            path = self._wait_for_image(seconds + BULB_READOUT_MARGIN)
             target = self._download(path, save_dir)
             self._last_shot = time.monotonic()
             return target
@@ -127,13 +136,14 @@ class Gphoto2Camera:
             path.folder, path.name, gp.GP_FILE_TYPE_NORMAL).save(target)
         return target
 
-    def _wait_for_image(self, timeout_ms=15000):
-        deadline = time.monotonic() + timeout_ms / 1000.0
+    def _wait_for_image(self, timeout):
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             etype, data = self._cam.wait_for_event(500)
             if etype == gp.GP_EVENT_FILE_ADDED:
                 return data
-        raise RuntimeError("bulb exposure produced no image")
+        raise RuntimeError(
+            f"bulb exposure produced no image within {timeout:.0f}s")
 
     def preview(self):
         with self._lock:
@@ -182,8 +192,15 @@ class Gphoto2Camera:
             mode = self._ensure_focus_mode(
                 self._quirks["af_modes"], self._quirks["af_target_mode"])
             af = self._quirks["af_widget"]
-            for value in self._quirks["af_drive_values"]:
-                self._drive_action(af, value)
+            *press, release = self._quirks["af_drive_values"]
+            try:
+                for value in press:
+                    self._drive_action(af, value)
+            except BaseException:
+                with contextlib.suppress(Exception):
+                    self._release_action(af, release)
+                raise
+            self._release_action(af, release)
             return mode
 
     def manual_focus(self, steps):
@@ -220,6 +237,22 @@ class Gphoto2Camera:
         widget = self._cam.get_single_config(widget_name)
         widget.set_value(_coerce(widget.get_type(), value))
         self._cam.set_single_config(widget_name, widget)
+
+    def _release_action(self, widget_name, value):
+        # The edge that leaves hardware latched if it never lands — an open
+        # shutter, a hunting lens — so one failed write is not the end of it.
+        for attempt in range(RELEASE_ATTEMPTS):
+            try:
+                return self._drive_action(widget_name, value)
+            except Exception as exc:
+                failure = exc
+                log.warning("release %s=%r failed (attempt %d/%d): %r",
+                            widget_name, value, attempt + 1, RELEASE_ATTEMPTS, exc)
+                if attempt < RELEASE_ATTEMPTS - 1:
+                    time.sleep(RELEASE_RETRY_DELAY)
+        log.error("could not release %s after %d attempts — the body may still "
+                  "be latched", widget_name, RELEASE_ATTEMPTS)
+        raise failure
 
     def list_settings(self):
         with self._lock:

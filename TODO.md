@@ -7,6 +7,7 @@ Each item states **what** is wrong, **why** it matters, and a suggested fix.
 Line numbers refer to the state of the tree at commit `da23621`.
 
 **Legend:** 🔴 critical · 🟠 high · 🟡 medium · ⚪ low / nit
+· ✅ fixed & verified · 🧪 fix applied, awaiting hardware verification
 
 ---
 
@@ -44,8 +45,28 @@ Line numbers refer to the state of the tree at commit `da23621`.
       seconds: float = Field(gt=0, le=MAX_BULB_SECONDS)
   ```
 
-### 2. 🔴 Bulb shutter release is single-shot — a failed write leaves the shutter open
+### 2. 🧪 Bulb shutter release is single-shot — a failed write leaves the shutter open
 
+- **Status:** Fix applied 2026-07-25 — **not yet verified on hardware.**
+  `_release_action()` retries the release `RELEASE_ATTEMPTS` (3) times with a
+  `RELEASE_RETRY_DELAY` (0.2s) backoff, logs `ERROR … may still be latched` if
+  every attempt fails, then re-raises the transport error so `_run_camera`
+  drops the camera and the watcher rebuilds it. `bulb()` now uses
+  `except BaseException` + `contextlib.suppress` rather than `finally`, so a
+  failure *during* the exposure keeps its own exception instead of being masked
+  by the release's. Unit-covered by `tests/test_gp2_camera.py::Bulb` — transient
+  failure retried and shutter ends closed; permanent failure raises and logs;
+  interrupted exposure keeps its own error.
+- **Residual risk (unfixable in software):** if the bus is gone, no retry closes
+  the shutter. The reconnect path releasing the USB claim is the only remaining
+  recovery. The original acceptance test asserted the shutter closes even when
+  *every* write fails — that was unachievable and has been replaced by the two
+  properties above.
+- **To verify:** needs the dial in M + BULB. Start a 30s exposure, pull the USB
+  cable ~5s in, and confirm the log shows `release bulb=0 failed (attempt 1/3)`
+  → `could not release bulb after 3 attempts` → `camera connection lost …
+  dropping`, that the client gets 503, and that replugging reconnects within
+  ~3s. `uhubctl` may be able to cut port power remotely if the Pi supports it.
 - **Where:** `camera/gp2.py:114-117`
 - **Issue:**
   ```python
@@ -66,8 +87,32 @@ Line numbers refer to the state of the tree at commit `da23621`.
   loudly if every attempt fails, and re-raise the original exception rather than
   the release's.
 
-### 3. 🔴 Bulb readout timeout is fixed at 15s — long exposures always report failure
+### 3. 🧪 Bulb readout timeout is fixed at 15s — long exposures always report failure
 
+- **Status:** Fix applied 2026-07-25 — **not yet verified on hardware.**
+  `_wait_for_image(timeout)` now takes seconds, and `bulb()` passes
+  `seconds + BULB_READOUT_MARGIN` (15s). The error message names its own
+  deadline (`produced no image within 45s`) so a future failure is diagnosable.
+  Unit-covered by `tests/test_gp2_camera.py::Bulb` — the window scales with the
+  exposure, and still terminates rather than spinning on the bus.
+- **Verification attempt 2026-07-25 was VOID.** The 30s test ran with the mode
+  dial in **P**, so the body fired a 1s Program-AE frame and the app simply
+  slept. EXIF on the resulting file: `ExposureTime 1/1`,
+  `ExposureProgram Program AE` — identical in kind to the ordinary capture taken
+  a minute later. Total wall time 32.0s = 30s sleep + ~2s, so readout was never
+  stressed and the old 15s deadline would have passed too. Blocked on physical
+  access to the mode dial. This void run is what surfaced #38.
+- **To verify:** dial to **M**, shutter speed past `30"` to **BULB**, Long
+  Exposure NR **On**, then `time curl -s -X POST localhost:8080/api/bulb -d
+  '{"seconds": 30}'`. Pass is `ok:true` with wall time **> 45s** (expect ~60s);
+  anything under 45s means the dark frame did not happen and the fix is still
+  untested.
+- **Still open:** the margin is a guess — the a7 IV's actual NR overhead has
+  never been measured. Once it is, consider moving it into the quirk table
+  rather than a module constant, since it is per-body timing.
+- **Still open:** the second half of this item is unaddressed. The timeout now
+  rarely fires, but when it does the orphaned `FILE_ADDED` still leaks into the
+  next capture's `_drain_events()` and desynchronises the event stream.
 - **Where:** `camera/gp2.py:130` (`_wait_for_image(self, timeout_ms=15000)`),
   called at `gp2.py:118`
 - **Issue:** The 15-second window starts *after* the exposure ends. With Long
@@ -84,8 +129,27 @@ Line numbers refer to the state of the tree at commit `da23621`.
   path = self._wait_for_image(timeout_ms=int((seconds * 2 + 20) * 1000))
   ```
 
-### 4. 🟠 AF drive has no fail-safe release (same shape as #2)
+### 4. 🧪 AF drive has no fail-safe release (same shape as #2)
 
+- **Status:** Fix applied 2026-07-25 — **success path verified on hardware,
+  failure path not.** `autofocus()` unpacks `*press, release =
+  af_drive_values` and drives the final value through `_release_action` (see
+  #2), attempting the release even if a press raises. Unit-covered by
+  `tests/test_gp2_camera.py::Autofocus`. Verified on the a7 IV 2026-07-25:
+  `POST /api/autofocus` → `{"ok":true,"focusmode":"AF-A"}`, lens focused and
+  settled, the capture immediately after succeeded, no release warnings logged.
+  Inducing a *failed* release needs the same USB-pull setup as #2.
+- **Behaviour change:** bodies with a single-edge `af_drive_values` (the generic
+  default `(1,)`) now retry a failed AF trigger, where previously one failed
+  write was final. The a7 IV's `(1, 0)` path emits an identical write sequence
+  to before.
+- **Observed 2026-07-25, unexplained:** the first capture after an AF returned
+  `[-1] Unspecified error` and succeeded on `_capture_with_retry`'s second
+  attempt. Pre-existing (this is why `capture_retry_attempts: 2` exists) and not
+  caused by this change — the success path emits the same writes as before. But
+  if the AF→capture correlation repeats, the real cause is likely the body still
+  being busy when the capture transaction arrives, and the honest fix is
+  draining events after the AF drive rather than letting the retry absorb it.
 - **Where:** `camera/sony.py:6` (`af_drive_values: (1, 0)`),
   `camera/gp2.py:179-187` (`autofocus`)
 - **Issue:** The loop writes each value in sequence with no `try`/`finally`. If the
@@ -114,6 +178,10 @@ Line numbers refer to the state of the tree at commit `da23621`.
 - **Fix:** In `_coerce`, take the widget (not just its type), read
   `lo, hi, step = widget.get_range()`, and clamp. Bound `FocusStep.steps` with a
   `Field(ge=…, le=…)` as defence in depth.
+- **Test:** acceptance test waiting at
+  `tests/test_known_gaps.py::RangeClamping` (expected-failure; fixing this makes
+  the run red with an *unexpected success* — that is the cue to promote it into
+  `tests/test_gp2_camera.py`).
 
 ### 6. 🟠 `POST /api/settings/{name}` can write *any* widget in the tree
 
@@ -139,6 +207,10 @@ Line numbers refer to the state of the tree at commit `da23621`.
                   return w
       raise KeyError(name)
   ```
+- **Test:** acceptance test waiting at
+  `tests/test_known_gaps.py::SettingsScope` (expected-failure). Note the test
+  drives `set_setting("bulb", 1)` directly — this endpoint can currently fire
+  the shutter.
 
 ---
 
@@ -293,6 +365,10 @@ Line numbers refer to the state of the tree at commit `da23621`.
 - **Fix:** `return {**DEFAULT_QUIRKS, **q}`, and assert at import that no vendor
   introduces a key absent from `DEFAULT_QUIRKS` (catches typos like `af_widgets`).
   Then strip `sony.GENERAL` down to only what actually differs.
+- **Test:** acceptance test waiting at
+  `tests/test_known_gaps.py::QuirkLayering` (expected-failure). The "no unknown
+  keys" half is already enforced by
+  `tests/test_gp2_helpers.py::QuirkResolution`.
 
 ### 14. 🟡 No declared vendor contract
 
@@ -569,6 +645,8 @@ These are the places it's weaker than it looks.
 - **Why it matters:** A plausible mistake in a future vendor file, surfacing as a
   confusing crash far from its cause.
 - **Fix:** Validate the quirk value (`max(1, attempts)`) or raise explicitly.
+- **Test:** acceptance test waiting at
+  `tests/test_known_gaps.py::RetryBounds` (expected-failure).
 
 ### 35. ⚪ Settings panel re-renders mid-interaction
 
@@ -585,30 +663,74 @@ These are the places it's weaker than it looks.
 - **Issue:** No WebSocket code anywhere in the tree.
 - **Fix:** Remove it.
 
-### 37. 🟠 No tests
+### 37. ✅ FIXED — No tests
 
-- **Where:** entire repo
-- **Issue:** Nothing exercises quirk resolution, `_coerce` clamping, the
-  error→HTTP-status mapping, or the disconnect/reconnect state machine.
-- **Why it matters:** The project targets ~2,000 camera models with per-model quirk
-  tables — the exact shape of problem where a regression is invisible until someone
-  plugs in the one body you broke. Several items above (#13, #15, #34) are
-  precisely the failures a test suite catches for free.
-- **Fix:** A mocked `gphoto2` layer covering the pure logic (quirks, coercion,
-  status mapping). libgphoto2 also ships a dummy/vusb driver that can be driven in
-  CI without hardware.
+- **Status:** Fixed 2026-07-25. `tests/` — 228 tests, stdlib `unittest`, no
+  third-party test dependencies. A fake `gphoto2` binding (`tests/fakes/`) is
+  installed into `sys.modules` before `camera` is imported, so the whole camera
+  layer runs with no libgphoto2 and no camera attached (139 of 228 execute on
+  the dev host, which has no pip). Covers exactly what this item asked for:
+  quirk resolution, `_coerce`, the error→HTTP-status mapping, and the
+  disconnect/reconnect state machine. Verified green on the Pi under
+  `.venv/bin/python` — `Ran 228 tests … OK (expected failures=4)` with **zero
+  skips**, so the FastAPI tests and the fake-vs-real-binding fidelity checks all
+  ran. See `tests/tests.md`.
+- **Note:** `tests/test_known_gaps.py` holds an `@expectedFailure` acceptance
+  test for each of #5, #6, #13 and #34. Fixing one of those makes the suite red
+  with an *unexpected success* — the cue to promote the test, not a regression.
+- **Still open:** the libgphoto2 `vusb` dummy driver is unused, so nothing
+  exercises the real binding end-to-end; there is no CI (the suite needs only
+  `fastapi`+`pydantic`, so this is cheap); and the frontend has only static
+  contract checks, no runtime tests.
+
+### 38. 🟠 `bulb` reports success when the body is not in BULB mode
+
+- **Where:** `camera/gp2.py` (`bulb`), `app.py` (`/api/bulb`)
+- **Issue:** `bulb()` refuses only when the *quirk table* has no bulb widget. It
+  never checks whether the body is in a state where driving that widget means
+  anything. Found on the rig 2026-07-25 while attempting to verify #3: with the
+  mode dial in **P**, `POST /api/bulb {"seconds": 30}` drove the widget (which
+  acts as a plain shutter release), the camera took a **1s Program-AE** frame,
+  the app slept its full 30s, downloaded that frame and returned
+  `{"ok":true,"path":…}`. Confirmed by EXIF: `ExposureTime 1/1`,
+  `ExposureProgram Program AE`.
+- **Why it matters:** A silent lie on a device with no screen. You would come
+  back from a night shoot with a card full of 1-second frames believing they
+  were 30-second ones — and the API said `ok:true` every time. It also cost a
+  full verification round on #3, because a green result looked like a pass.
+  Reporting success for work not performed is worse than failing.
+- **Fix:** Before driving the widget, read the exposure-mode / shutter-speed
+  widget and raise `RuntimeError` (→409) if the body is not in manual + BULB.
+  Needs one fact from the rig first: what `shutterspeed` reports when the body
+  *is* in BULB —
+  `curl -s localhost:8080/api/settings | python3 -m json.tool | grep -iE -A6 '"(shutterspeed|expprogram|exposuremode)"'`
+  run once in P and once in BULB.
+- **See also:** #17 (rig-verify quirk values), #3 (blocked behind the same dial
+  access).
 
 ---
 
 ## Suggested order
 
-1. **#1, #2, #3** — bulb bounds, fail-safe release, scaled readout timeout
-2. **#5** — clamp RANGE widgets in `_coerce` (protects the focus motor *and* every slider)
-3. **#6** — validate the settings widget name
-4. **#4, #7** — AF fail-safe, bound `_drain_events`
+**Done:** #1 (verified), #37 (verified). #2, #3, #4 have fixes applied and unit
+coverage but are 🧪 — see "blocked" below.
+
+**Blocked on physical access to the camera's mode dial** (needs M + BULB, and
+Long Exposure NR on): verifying #2, #3, and #38. Nothing else depends on this,
+so it is not on the critical path — do the items below while it waits.
+
+1. **#5** — clamp RANGE widgets in `_coerce` (protects the focus motor *and* every slider)
+2. **#6** — validate the settings widget name
+3. **#38** — refuse `bulb` when the body is not in BULB (the discovery command is
+   in that item; it needs the dial too, but only to *read* one value)
+4. **#7** — bound `_drain_events`
 5. **#8** — bounded lock acquisition + `WatchdogSec` (turns hangs into restarts)
 6. **#13, #14** — quirk layering and vendor contract, **before** adding Canon/Nikon
 7. **#17** — verify `changeafarea` / `bulb` / AF idle value on the rig
+   (batch this with the #2/#3/#38 dial session — same setup, one trip)
 8. **#9** — compare-and-swap in `_drop_camera`
 9. **#10** — single shared liveview producer (largest change; what makes multi-client work)
 10. Everything else, opportunistically
+
+#5, #6, #13 and #34 each have an `@expectedFailure` acceptance test already
+written in `tests/test_known_gaps.py` — start there.
