@@ -25,6 +25,15 @@ class FocusStep(BaseModel):
     steps: int
 
 
+class BulbExposure(BaseModel):
+    seconds: float
+
+
+class AfPoint(BaseModel):
+    x: float
+    y: float
+
+
 def _try_connect(app: FastAPI) -> None:
     try:
         app.state.camera = camera.connect()
@@ -131,8 +140,23 @@ async def capture():
     cam = _require_camera()
     try:
         path = await _run_camera(cam.capture)
-    except RuntimeError as exc:  # e.g. recording in progress
+    except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+    return {"ok": True, "path": path}
+
+
+@app.post("/api/bulb")
+async def bulb(body: BulbExposure):
+    cam = _require_camera()
+    try:
+        path = await _run_camera(cam.bulb, body.seconds)
+    except HTTPException:
+        raise  # disconnect (503)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:
+        log.warning("bulb(%s) failed: %r", body.seconds, exc, exc_info=True)
+        raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True, "path": path}
 
 
@@ -176,7 +200,7 @@ async def _set_recording(on: bool):
     try:
         recording = await _run_camera(cam.set_recording, on)
     except HTTPException:
-        raise  # disconnect (503) — don't mask it as a 400
+        raise  # disconnect (503)
     except Exception as exc:
         log.warning("set_recording(%s) failed: %r", on, exc)
         raise HTTPException(status_code=400, detail=str(exc))
@@ -219,6 +243,19 @@ async def manual_focus(body: FocusStep):
     return {"ok": True, "focusmode": mode}
 
 
+@app.post("/api/afpoint")
+async def af_point(body: AfPoint):
+    cam = _require_camera()
+    try:
+        await _run_camera(cam.set_af_point, body.x, body.y)
+    except HTTPException:
+        raise  # disconnect (503)
+    except Exception as exc:
+        log.warning("set_af_point(%s, %s) failed: %r", body.x, body.y, exc, exc_info=True)
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True}
+
+
 @app.get("/api/telemetry")
 async def telemetry():
     cam = _require_camera()
@@ -237,7 +274,7 @@ async def set_setting(name: str, body: SettingValue):
     try:
         await _run_camera(cam.set_setting, name, body.value)
     except HTTPException:
-        raise  # disconnect (503) — don't mask it as a 400
+        raise  # disconnect (503)
     except Exception as exc:
         log.warning("set_setting %s=%r failed: %r", name, body.value, exc)
         raise HTTPException(status_code=400, detail=str(exc))

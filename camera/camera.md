@@ -96,6 +96,40 @@ Runs entirely under `_lock`, in four steps:
 A capture is refused with `RuntimeError` if `self.recording` is set — stills and
 video are mutually exclusive on the body — which `app.py` surfaces as a 409.
 
+The download half (make dir → timestamp-prefix the name → `file_get().save()`) is
+factored into `_download(path, save_dir)`, shared with `bulb()`.
+
+### `bulb(seconds)`
+
+A **timed manual exposure**, for shots longer than the body's fastest bulb-less
+shutter. It writes the vendor's bulb-release action (`bulb_widget`, `"bulb"` on
+Sony) high to open the shutter, sleeps `seconds`, then writes it low to close —
+the two `_drive_action` writes are a rising then falling **edge** on the release
+line, the software analog of pressing and letting go of a cable release. The close
+is in a `finally`, so an error or cancellation mid-exposure can never strand the
+shutter open.
+
+The whole exposure runs under `_lock`, i.e. the sleep **holds the camera lock for
+its full duration** — deliberately: no other PTP traffic (preview, telemetry,
+another capture) may share the bus during an open exposure, and the lock is what
+enforces that. The frontend tears its preview stream down for the same reason.
+Because the lock is held, a disconnect during a bulb can't be reaped until the
+exposure ends — the same cost any long exposure carries.
+
+Unlike `capture()`, the body doesn't hand back a path synchronously: after the
+close it writes the frame asynchronously and announces it with a
+`GP_EVENT_FILE_ADDED` event. `_wait_for_image()` polls `wait_for_event` in 500 ms
+slices (15 s cap) for that event's `CameraFilePath`, then `_download`s it exactly
+as `capture()` does. Refused with `RuntimeError` (→ 409) while recording, or if
+`bulb_widget` is `None` (body opts out).
+
+> **Body requirement:** `bulb` only opens the shutter when the body's exposure
+> mode is actually **Bulb** (shutter-speed dial / `shutterspeed` = `BULB`). The app
+> fires the release; it does not force the mode, so a bulb request in any other
+> mode does nothing useful. That's a mode gate we *could* manage later (à la
+> `_ensure_focus_mode`) if a body exposes `shutterspeed`/exposure-mode as a
+> settable widget.
+
 ### `set_recording(on)`
 
 Starts/stops movie recording by writing the vendor's **movie toggle widget**
@@ -173,6 +207,28 @@ value, so it's a real edge that re-fires the momentary action rather than a no-o
 Unlike `capture`/`preview`, these are **not** gated on `self.recording`: they're
 plain config writes (as `set_setting` is), and driving focus mid-recording is a
 deliberate use case (rack focus during video).
+
+### `set_af_point(x, y)`
+
+Moves the AF point to where the user tapped the live preview. To keep the frontend
+camera-agnostic, `x`/`y` arrive **frame-normalized** — floats in `[0, 1]`, origin
+top-left — i.e. "a fraction of the way across the frame," carrying no knowledge of
+the body's coordinate grid. `_scale(fraction, size)` clamps to `[0, 1]` (a stray
+tap outside the image can't push the point off-sensor) and maps onto the body's
+native grid from the `af_area_size` quirk, and the two integers are handed to the
+`af_area_widget` (`"changeafarea"` on Sony) as a `"x,y"` string — a `TEXT` widget,
+so `_coerce` passes it through untouched. Refused with `RuntimeError` (→ 400) if
+`af_area_widget` is `None`. Like the focus actions it's driven directly through
+`_drive_action`, not shown as a settings row.
+
+> **Body specifics to verify on hardware.** Two values here are best-guesses until
+> checked against a live α7 IV, both isolated in the quirk table so a correction
+> is one line: (1) `af_area_size` — the native grid the fraction scales onto,
+> defaulted to `(640, 480)`; confirm the accepted range with `gphoto2 --get-config
+> changeafarea` (or by trying corner taps). (2) The widget requires a **spot /
+> flexible focus-area mode** — in a Wide mode the point can't move and the body
+> ignores or rejects the write. Managing that mode automatically (à la
+> `_ensure_focus_mode`) is a natural follow-up if it proves fiddly in practice.
 
 ### `preview()`
 
@@ -292,6 +348,9 @@ The quirk keys:
 | `af_target_mode` | mode to switch to for AF when outside `af_modes` | `"AF-A"` | `None` |
 | `mf_modes` | modes in which `manualfocus` drives the motor | `("Manual",)` | `()` |
 | `mf_target_mode` | mode to switch to for manual focus when outside `mf_modes` | `"Manual"` | `None` |
+| `bulb_widget` | config name of the bulb-release action (`None` = unsupported) | `"bulb"` | `None` |
+| `af_area_widget` | config name of the AF-area/point action (`None` = unsupported) | `"changeafarea"` | `None` |
+| `af_area_size` | native AF-grid size `(w, h)` the normalized tap is scaled onto | `(640, 480)` | `(0, 0)` |
 
 `gp2._quirks_for(model)` walks each module in `VENDORS = [sony]` in order, taking
 the first non-`None` result, and falls back to `DEFAULT_QUIRKS` for anything

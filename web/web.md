@@ -20,9 +20,11 @@ documented in **`camera.md`**.
   box, wrapping the `#preview` `<img>` the MJPEG stream feeds), `#telemetry` (the
   read-only battery/storage/lens chip strip), `#focus` (the
   focus control group: `#af` plus `#focusNear`/`#focusStep`/`#focusFar`), `#shoot`
-  (Capture button), `#record` (Record/Stop button), `#result` (last-action
-  feedback), and `#settings` (the dynamic settings panel). The liveview sits
-  directly above the telemetry strip, the focus group, and the two buttons. Loads `style.css` in `<head>` and
+  (Capture button), `#record` (Record/Stop button), `#bulb` (the bulb group:
+  `#bulbBtn` + `#bulbSeconds`), `#result` (last-action feedback), and `#settings`
+  (the dynamic settings panel). The `#preview` `<img>` also carries an overlaid
+  `#afMarker` crosshair for tap-to-focus. The liveview sits directly above the
+  telemetry strip, the focus group, and the buttons. Loads `style.css` in `<head>` and
   `script.js` at the end of `<body>`. The favicon is a `data:,` no-op so the
   browser doesn't fire a 404 for `/favicon.ico`.
 - **`script.js`** — all behavior: status polling, the liveview stream, the
@@ -150,6 +152,29 @@ than reaching in to patch a named widget, so the frontend keeps its no-camera-
 knowledge invariant. (The endpoints also return the effective `focusmode`, but the
 client ignores it for exactly that reason — using it would mean hardcoding the
 widget name here.)
+
+### Bulb and tap-to-focus
+
+Two controls that reach the `actions`-widget routes (`/api/bulb`, `/api/afpoint`):
+
+- **`#bulbBtn`** → `POST /api/bulb` with `{seconds}` from `#bulbSeconds`. Because
+  the backend holds the camera lock for the *entire* exposure (see **`camera.md`**),
+  the handler sets a client `bulbing` flag, which (a) is folded into
+  `updateLiveview()`'s desired on-state (`connected && !recording && !bulbing`) so
+  the preview stream is torn down for the exposure and restored after, and (b)
+  early-returns `loadTelemetry()` the same way `recording` does — neither should
+  fight the lock. Capture/Record/Bulb are disabled for the duration, and a 1 Hz
+  `setInterval` counts the exposure down in `#result` (`Exposing Ns…` → `Reading
+  out…`). The `finally` clears the flag, re-enables the buttons (re-applying the
+  recording lock-out to `#shoot`), and calls `updateLiveview()` to resume.
+- **Tap the `#preview` image** → `POST /api/afpoint` with `{x, y}`. The click's
+  position is converted to **frame-normalized** fractions (`0..1`) against the
+  `<img>`'s `getBoundingClientRect()` — so the frontend sends "where in the frame"
+  and stays camera-agnostic; the backend scales to the body's AF grid. The handler
+  no-ops unless a preview is actually streaming (`connected && !recording &&
+  !bulbing && src set`). `pingAfMarker()` drops the `#afMarker` crosshair at the
+  tap point and restarts its one-shot CSS `afping` animation (remove class → force
+  reflow → re-add), giving instant visual feedback independent of the request.
 
 ### Dynamic settings rendering
 

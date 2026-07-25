@@ -10,6 +10,9 @@ const afBtn = document.getElementById("af");
 const focusNearBtn = document.getElementById("focusNear");
 const focusFarBtn = document.getElementById("focusFar");
 const focusStepEl = document.getElementById("focusStep");
+const bulbBtn = document.getElementById("bulbBtn");
+const bulbSecondsEl = document.getElementById("bulbSeconds");
+const afMarker = document.getElementById("afMarker");
 
 async function api(url, opts) {
   const r = await fetch(url, opts);
@@ -20,9 +23,10 @@ async function api(url, opts) {
 let wasConnected = false;
 let connected = false;
 let recording = false;
+let bulbing = false;
 
 function startLiveview() {
-  previewImg.src = "/api/liveview?t=" + Date.now();  // cache-buster forces a fresh stream
+  previewImg.src = "/api/liveview?t=" + Date.now();
   liveviewEl.classList.remove("offline");
 }
 
@@ -32,7 +36,7 @@ function stopLiveview() {
 }
 
 function updateLiveview() {
-  const shouldStream = connected && !recording;
+  const shouldStream = connected && !recording && !bulbing;
   const streaming = previewImg.hasAttribute("src");
   if (shouldStream && !streaming) startLiveview();
   else if (!shouldStream && streaming) stopLiveview();
@@ -40,13 +44,11 @@ function updateLiveview() {
 
 previewImg.addEventListener("error", stopLiveview);
 
-// Reflect recording state in the UI. Stills and video are mutually exclusive on
-// the camera, so the capture button is disabled while recording is in progress.
 function setRecording(on) {
   recording = on;
   recordBtn.textContent = on ? "Stop recording" : "Record";
   recordBtn.classList.toggle("recording", on);
-  shootBtn.disabled = on;
+  shootBtn.disabled = on || bulbing;  // don't let a status poll re-enable capture mid-bulb
   updateLiveview();
 }
 
@@ -87,7 +89,7 @@ function renderTelemetry(items) {
 }
 
 async function loadTelemetry() {
-  if (!connected || recording) return;
+  if (!connected || recording || bulbing) return;
   try {
     renderTelemetry(await api("/api/telemetry"));
   } catch {
@@ -157,6 +159,62 @@ async function driveFocus(steps) {
 
 focusNearBtn.addEventListener("click", () => driveFocus(-Number(focusStepEl.value)));
 focusFarBtn.addEventListener("click", () => driveFocus(+Number(focusStepEl.value)));
+
+bulbBtn.addEventListener("click", async () => {
+  const seconds = Number(bulbSecondsEl.value);
+  if (!(seconds > 0)) { resultEl.textContent = "Enter a bulb time > 0"; return; }
+  bulbing = true;
+  bulbBtn.disabled = shootBtn.disabled = recordBtn.disabled = true;
+  updateLiveview();  // tear the preview down — the body owns the bus for the exposure
+  let remaining = Math.ceil(seconds);
+  resultEl.textContent = `Exposing ${remaining}s…`;
+  const tick = setInterval(() => {
+    remaining -= 1;
+    resultEl.textContent = remaining > 0 ? `Exposing ${remaining}s…` : "Reading out…";
+  }, 1000);
+  try {
+    await api("/api/bulb", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seconds }),
+    });
+    resultEl.textContent = "Bulb captured ✓";
+  } catch (e) {
+    resultEl.textContent = `Error: ${e.message}`;
+  } finally {
+    clearInterval(tick);
+    bulbing = false;
+    bulbBtn.disabled = recordBtn.disabled = false;
+    shootBtn.disabled = recording;  // don't undo the recording lock-out
+    updateLiveview();               // resume the preview
+  }
+});
+
+previewImg.addEventListener("click", async (e) => {
+  if (!connected || recording || bulbing || !previewImg.hasAttribute("src")) return;
+  const rect = previewImg.getBoundingClientRect();
+  const x = (e.clientX - rect.left) / rect.width;
+  const y = (e.clientY - rect.top) / rect.height;
+  pingAfMarker(x, y);
+  try {
+    await api("/api/afpoint", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ x, y }),
+    });
+    resultEl.textContent = "AF point set ✓";
+  } catch (err) {
+    resultEl.textContent = `Error: ${err.message}`;
+  }
+});
+
+function pingAfMarker(x, y) {
+  afMarker.style.left = `${x * 100}%`;
+  afMarker.style.top = `${y * 100}%`;
+  afMarker.classList.remove("ping");
+  void afMarker.offsetWidth;  // reflow so re-adding the class restarts the animation
+  afMarker.classList.add("ping");
+}
 
 const settingRenderers = {
   choice: (setting, apply) => {

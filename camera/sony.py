@@ -9,6 +9,9 @@ GENERAL = {
     "af_target_mode": "AF-A",
     "mf_modes": ("Manual",),
     "mf_target_mode": "Manual",
+    "bulb_widget": "bulb",
+    "af_area_widget": "changeafarea",
+    "af_area_size": (640, 480),
 }
 
 MODELS = {

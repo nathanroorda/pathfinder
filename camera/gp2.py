@@ -23,6 +23,9 @@ DEFAULT_QUIRKS = {
     "af_target_mode": None,
     "mf_modes": (),
     "mf_target_mode": None,
+    "bulb_widget": None,
+    "af_area_widget": None,
+    "af_area_size": (0, 0),
 }
 VENDORS = [sony]
 
@@ -91,12 +94,46 @@ class Gphoto2Camera:
                 time.sleep(wait)
             self._drain_events()
             path = self._capture_with_retry()
-            os.makedirs(save_dir, exist_ok=True)
-            target = os.path.join(save_dir, f"{int(time.time())}_{path.name}")
-            self._cam.file_get(
-                path.folder, path.name, gp.GP_FILE_TYPE_NORMAL).save(target)
+            target = self._download(path, save_dir)
             self._last_shot = time.monotonic()
             return target
+
+    def bulb(self, seconds, save_dir=CAPTURE_DIR):
+        with self._lock:
+            self._require_open()
+            if self.recording:
+                raise RuntimeError("cannot capture a still while recording")
+            widget = self._quirks["bulb_widget"]
+            if not widget:
+                raise RuntimeError("bulb is not supported on this body")
+            wait = self._quirks["shot_gap"] - (time.monotonic() - self._last_shot)
+            if wait > 0:
+                time.sleep(wait)
+            self._drain_events()
+            self._drive_action(widget, 1)
+            try:
+                time.sleep(seconds)
+            finally:
+                self._drive_action(widget, 0)
+            path = self._wait_for_image()
+            target = self._download(path, save_dir)
+            self._last_shot = time.monotonic()
+            return target
+
+    def _download(self, path, save_dir):
+        os.makedirs(save_dir, exist_ok=True)
+        target = os.path.join(save_dir, f"{int(time.time())}_{path.name}")
+        self._cam.file_get(
+            path.folder, path.name, gp.GP_FILE_TYPE_NORMAL).save(target)
+        return target
+
+    def _wait_for_image(self, timeout_ms=15000):
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while time.monotonic() < deadline:
+            etype, data = self._cam.wait_for_event(500)
+            if etype == gp.GP_EVENT_FILE_ADDED:
+                return data
+        raise RuntimeError("bulb exposure produced no image")
 
     def preview(self):
         with self._lock:
@@ -156,6 +193,15 @@ class Gphoto2Camera:
                 self._quirks["mf_modes"], self._quirks["mf_target_mode"])
             self._drive_action(self._quirks["manual_focus_widget"], steps)
             return mode
+
+    def set_af_point(self, x, y):
+        with self._lock:
+            self._require_open()
+            widget = self._quirks["af_area_widget"]
+            if not widget:
+                raise RuntimeError("AF-point selection is not supported on this body")
+            w, h = self._quirks["af_area_size"]
+            self._drive_action(widget, f"{_scale(x, w)},{_scale(y, h)}")
 
     def _ensure_focus_mode(self, acceptable, target):
         name = self._quirks["focus_mode_widget"]
@@ -241,6 +287,10 @@ def _describe_status(widget):
         "label": widget.get_label(),
         "value": value,
     }
+
+
+def _scale(fraction, size):
+    return int(round(min(1.0, max(0.0, float(fraction))) * size))
 
 
 def _coerce(widget_type, value):

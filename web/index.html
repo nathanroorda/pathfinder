@@ -13,6 +13,7 @@
     <p id="status" class="status">connecting…</p>
     <div id="liveview" class="liveview offline">
       <img id="preview" alt="live preview">
+      <div id="afMarker" class="af-marker"></div>
     </div>
     <div id="telemetry" class="telemetry"></div>
     <div id="focus" class="focus">
@@ -29,6 +30,12 @@
     </div>
     <button id="shoot">Capture</button>
     <button id="record">Record</button>
+    <div id="bulb" class="bulb">
+      <button id="bulbBtn" class="bulb-btn">Bulb</button>
+      <input id="bulbSeconds" type="number" min="0.1" step="0.5" value="1"
+             aria-label="bulb exposure seconds">
+      <span class="bulb-unit">s</span>
+    </div>
     <p id="result" class="result"></p>
     <section id="settings" class="settings"></section>
   </main>
