@@ -1,0 +1,187 @@
+import unittest
+from unittest import mock
+
+from tests import support
+
+import gphoto2 as gp
+from camera import gp2, sony
+from tests.fakes.fake_camera import FakeWidget
+
+
+class Coerce(unittest.TestCase):
+    def test_range_becomes_float(self):
+        for value in (3, 3.0, "3", "3.5", True):
+            with self.subTest(value=value):
+                self.assertIsInstance(gp2._coerce(gp.GP_WIDGET_RANGE, value), float)
+        self.assertEqual(gp2._coerce(gp.GP_WIDGET_RANGE, "-7"), -7.0)
+
+    def test_toggle_becomes_int(self):
+        self.assertEqual(gp2._coerce(gp.GP_WIDGET_TOGGLE, True), 1)
+        self.assertEqual(gp2._coerce(gp.GP_WIDGET_TOGGLE, False), 0)
+        self.assertEqual(gp2._coerce(gp.GP_WIDGET_TOGGLE, "1"), 1)
+        self.assertIsInstance(gp2._coerce(gp.GP_WIDGET_TOGGLE, 1.0), int)
+
+    def test_everything_else_becomes_str(self):
+        for wtype in (gp.GP_WIDGET_RADIO, gp.GP_WIDGET_MENU, gp.GP_WIDGET_TEXT):
+            with self.subTest(wtype=wtype):
+                self.assertEqual(gp2._coerce(wtype, 400), "400")
+                self.assertEqual(gp2._coerce(wtype, "f/2.8"), "f/2.8")
+
+    def test_uncoercible_value_raises_rather_than_reaching_usb(self):
+        with self.assertRaises(ValueError):
+            gp2._coerce(gp.GP_WIDGET_RANGE, "not-a-number")
+
+
+class Scale(unittest.TestCase):
+    def test_maps_the_unit_interval_onto_the_grid(self):
+        self.assertEqual(gp2._scale(0.0, 640), 0)
+        self.assertEqual(gp2._scale(1.0, 640), 640)
+        self.assertEqual(gp2._scale(0.5, 640), 320)
+        self.assertEqual(gp2._scale(0.5, 480), 240)
+
+    def test_clamps_out_of_range_input(self):
+        self.assertEqual(gp2._scale(-0.4, 640), 0)
+        self.assertEqual(gp2._scale(-1e9, 640), 0)
+        self.assertEqual(gp2._scale(1.4, 640), 640)
+        self.assertEqual(gp2._scale(float("inf"), 640), 640)
+
+    def test_accepts_string_input_and_returns_int(self):
+        self.assertEqual(gp2._scale("0.25", 640), 160)
+        self.assertIsInstance(gp2._scale(0.3, 640), int)
+
+    def test_nan_collapses_to_zero_rather_than_reaching_the_body(self):
+        self.assertEqual(gp2._scale(float("nan"), 640), 0)
+
+
+class DisconnectClassification(unittest.TestCase):
+    def test_transport_codes_are_disconnects(self):
+        for code in (-7, -31, -34, -35, -52, -53):
+            with self.subTest(code=code):
+                self.assertTrue(gp2.is_disconnect_error(gp.GPhoto2Error(code)))
+
+    def test_usb_find_52_is_a_disconnect(self):
+        self.assertTrue(
+            gp2.is_disconnect_error(gp.GPhoto2Error(gp.GP_ERROR_IO_USB_FIND)))
+
+    def test_our_own_closed_connection_marker_is_a_disconnect(self):
+        self.assertTrue(gp2.is_disconnect_error(gp2.CameraDisconnected("closed")))
+
+    def test_logical_errors_are_not_disconnects(self):
+        for code in (gp.GP_ERROR, gp.GP_ERROR_BAD_PARAMETERS,
+                     gp.GP_ERROR_NOT_SUPPORTED, gp.GP_ERROR_TIMEOUT):
+            with self.subTest(code=code):
+                self.assertFalse(gp2.is_disconnect_error(gp.GPhoto2Error(code)))
+
+    def test_non_gphoto_exceptions_are_not_disconnects(self):
+        for exc in (RuntimeError("busy"), ValueError("bad"), OSError("io")):
+            with self.subTest(exc=exc):
+                self.assertFalse(gp2.is_disconnect_error(exc))
+
+
+class QuirkResolution(unittest.TestCase):
+    def test_sony_model_resolves_to_the_sony_table(self):
+        self.assertEqual(
+            gp2._quirks_for("Sony Alpha-A7 IV (PC Control)")["af_widget"], "autofocus")
+
+    def test_unmatched_model_falls_back_to_generic_defaults(self):
+        self.assertEqual(gp2._quirks_for("Canon EOS R5"), gp2.DEFAULT_QUIRKS)
+
+    def test_unmatched_model_is_logged_loudly(self):
+        with self.assertLogs("camera.gp2", level="WARNING") as captured:
+            gp2._quirks_for("Canon EOS R5")
+        self.assertIn("Canon EOS R5", "\n".join(captured.output))
+
+    def test_every_vendor_table_covers_every_default_key(self):
+        for vendor in gp2.VENDORS:
+            with self.subTest(vendor=vendor.__name__):
+                self.assertEqual(set(vendor.GENERAL), set(gp2.DEFAULT_QUIRKS))
+
+    def test_model_overrides_introduce_no_unknown_keys(self):
+        for override in sony.MODELS.values():
+            self.assertLessEqual(set(override), set(gp2.DEFAULT_QUIRKS))
+
+    def test_first_matching_vendor_wins(self):
+        other = mock.Mock()
+        other.quirks.return_value = {"shot_gap": 9.0}
+        with mock.patch.object(gp2, "VENDORS", [other, sony]):
+            self.assertEqual(gp2._quirks_for("Sony Alpha-A7 IV")["shot_gap"], 9.0)
+
+
+class WidgetWalk(unittest.TestCase):
+    def _tree(self):
+        return FakeWidget("main", gp.GP_WIDGET_WINDOW, children=[
+            FakeWidget("iso", gp.GP_WIDGET_RADIO, value="400", choices=("100", "400")),
+            FakeWidget("group", gp.GP_WIDGET_SECTION, children=[
+                FakeWidget("deep", gp.GP_WIDGET_SECTION, children=[
+                    FakeWidget("nested", gp.GP_WIDGET_TEXT, value="x"),
+                ]),
+                FakeWidget("shallow", gp.GP_WIDGET_TOGGLE, value=0),
+            ]),
+        ])
+
+    def test_returns_leaves_from_every_depth(self):
+        names = [w.get_name() for w in gp2._walk(self._tree())]
+        self.assertEqual(names, ["iso", "nested", "shallow"])
+
+    def test_containers_are_not_themselves_returned(self):
+        names = [w.get_name() for w in gp2._walk(self._tree())]
+        self.assertNotIn("group", names)
+        self.assertNotIn("deep", names)
+
+    def test_empty_tree_is_not_an_error(self):
+        self.assertEqual(gp2._walk(FakeWidget("main", gp.GP_WIDGET_WINDOW)), [])
+
+
+class Describe(unittest.TestCase):
+    def test_choice_carries_its_options(self):
+        widget = FakeWidget("iso", gp.GP_WIDGET_RADIO, value="400",
+                            label="ISO Speed", choices=("100", "400", "800"))
+        self.assertEqual(gp2._describe(widget), {
+            "name": "iso", "label": "ISO Speed", "type": "choice",
+            "value": "400", "choices": ["100", "400", "800"],
+        })
+
+    def test_menu_is_also_a_choice(self):
+        widget = FakeWidget("wb", gp.GP_WIDGET_MENU, value="Auto", choices=("Auto",))
+        self.assertEqual(gp2._describe(widget)["type"], "choice")
+
+    def test_range_carries_min_max_step(self):
+        widget = FakeWidget("burst", gp.GP_WIDGET_RANGE, value=1.0, rng=(1.0, 10.0, 1.0))
+        described = gp2._describe(widget)
+        self.assertEqual(described["type"], "range")
+        self.assertEqual((described["min"], described["max"], described["step"]),
+                         (1.0, 10.0, 1.0))
+        self.assertNotIn("choices", described)
+
+    def test_toggle_and_text_carry_only_the_common_keys(self):
+        for wtype, kind in ((gp.GP_WIDGET_TOGGLE, "toggle"),
+                            (gp.GP_WIDGET_TEXT, "text")):
+            with self.subTest(kind=kind):
+                described = gp2._describe(FakeWidget("w", wtype, value=1))
+                self.assertEqual(described["type"], kind)
+                self.assertEqual(set(described), {"name", "label", "type", "value"})
+
+    def test_every_kind_the_browser_renders_is_producible(self):
+        self.assertEqual(set(gp2._KIND.values()), {"choice", "toggle", "range", "text"})
+
+
+class DescribeStatus(unittest.TestCase):
+    def test_reports_name_label_value(self):
+        widget = FakeWidget("batterylevel", gp.GP_WIDGET_TEXT, value="87%",
+                            label="Battery Level")
+        self.assertEqual(gp2._describe_status(widget), {
+            "name": "batterylevel", "label": "Battery Level", "value": "87%"})
+
+    def test_unreadable_widget_degrades_to_none_instead_of_failing_the_request(self):
+        widget = FakeWidget("serialnumber", gp.GP_WIDGET_TEXT, value="x",
+                            value_error=gp.GPhoto2Error(gp.GP_ERROR_NOT_SUPPORTED))
+        self.assertIsNone(gp2._describe_status(widget)["value"])
+
+    def test_non_gphoto_errors_still_propagate(self):
+        widget = FakeWidget("boom", gp.GP_WIDGET_TEXT, value_error=RuntimeError("boom"))
+        with self.assertRaises(RuntimeError):
+            gp2._describe_status(widget)
+
+
+if __name__ == "__main__":
+    unittest.main()

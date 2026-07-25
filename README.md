@@ -42,10 +42,14 @@ For a Pathfinder device that's already been provisioned:
 │   ├── __init__.py  Public interface: connect() / disconnect()
 │   ├── gp2.py       libgphoto2 backend: capture, liveview, recording, focus, settings
 │   └── sony.py      Per-model quirks (timing, retry, focus widgets & modes)
-└── web/
-    ├── index.html  Page shell
-    ├── script.js   Status polling, capture button, settings rendering
-    └── style.css   Styling
+├── web/
+│   ├── index.html  Page shell
+│   ├── script.js   Status polling, capture button, settings rendering
+│   └── style.css   Styling
+└── tests/
+    ├── tests.md    How the suite works and what it deliberately misses
+    ├── fakes/      A fake libgphoto2 — the suite needs no camera
+    └── test_*.py   unittest modules
 ```
 
 </details>
@@ -57,6 +61,16 @@ For a Pathfinder device that's already been provisioned:
 - **`app.py` / `run.py`** — a FastAPI app exposing a small REST API (`/api/status`, `/api/connect`, `/api/capture`, `/api/liveview`, `/api/record/*`, `/api/autofocus`, `/api/focus`, `/api/telemetry`, `/api/settings`) and serving `web/` as static files. Runs under `uvicorn`.
 - **`camera/`** — wraps the `gphoto2` Python binding. `gp2.py` handles connecting, capturing, live preview, recording, focus, and reading/writing settings; `sony.py` holds per-model quirks (timing, retry, focus widgets & modes) looked up by camera model string.
 - **`web/`** — a small vanilla JS/HTML/CSS frontend. It shows a live preview and focus controls, renders whatever settings the connected camera reports (choice/toggle/range/text controls, built dynamically from the API response), and posts changes back.
+- **`tests/`** — a `unittest` suite that runs against a fake libgphoto2, so no camera (and no `gphoto2` install) is needed. See **`tests/tests.md`**.
+
+## Tests
+
+```
+python3 -m unittest discover -t . -s tests    # from the repo root
+python3 tests/run_tests.py -v                 # same, from anywhere
+```
+
+No third-party test dependencies. On a machine without `fastapi`/`pydantic` the request-layer tests skip and the rest still run; on the Pi, use `.venv/bin/python` to run everything. Details, coverage and the manual hardware checks the suite can't replace are in **`tests/tests.md`**.
 
 ## Provisioning a New Device
 
