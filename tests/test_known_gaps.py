@@ -25,27 +25,6 @@ class KnownGapTestCase(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.save_dir, ignore_errors=True)
 
 
-class RangeClamping(KnownGapTestCase):
-    @unittest.expectedFailure  # TODO.md #5
-    def test_manual_focus_is_clamped_to_the_widget_range(self):
-        low, high, _ = self.device.config.get_child_by_name("manualfocus").get_range()
-
-        self.cam.manual_focus(100000)
-
-        driven = self.device.calls_named("set_single_config")[-1][2]
-        self.assertLessEqual(driven, high)
-        self.assertGreaterEqual(driven, low)
-
-
-class SettingsScope(KnownGapTestCase):
-    @unittest.expectedFailure  # TODO.md #6
-    def test_settings_cannot_write_action_widgets(self):
-        with self.assertRaises(Exception):
-            self.cam.set_setting("bulb", 1)
-
-        self.assertEqual(self.device.value_of("bulb"), 0)
-
-
 class QuirkLayering(unittest.TestCase):
     @unittest.expectedFailure  # TODO.md #13
     def test_a_vendor_table_need_not_repeat_every_default(self):

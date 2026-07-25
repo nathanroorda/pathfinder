@@ -293,6 +293,16 @@ class Settings(RouteTestCase):
 
         self.assertIsInstance(self.cam.called("set_setting")[0][2], int)
 
+    def test_a_widget_outside_the_listing_is_a_404_not_a_400(self):
+        self.cam.errors["set_setting"] = KeyError("bulb")
+
+        exc = self.assertHTTPStatus(404, lambda: app_module.set_setting(
+            "bulb", app_module.SettingValue(value=1)))
+
+        self.assertIn("bulb", exc.detail)
+        self.assertEqual(self.cam.called("list_settings"), [])
+        self.assertIs(self.state.camera, self.cam)
+
 
 class Liveview(RouteTestCase):
     def setUp(self):

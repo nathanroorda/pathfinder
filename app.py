@@ -17,6 +17,7 @@ import camera
 log = logging.getLogger(__name__)
 
 DEFAULT_MAX_BULB_SECONDS = 900.0
+MAX_FOCUS_STEPS = 10000
 
 
 def _max_bulb_seconds() -> float:
@@ -42,7 +43,7 @@ class SettingValue(BaseModel):
 
 
 class FocusStep(BaseModel):
-    steps: int
+    steps: int = Field(ge=-MAX_FOCUS_STEPS, le=MAX_FOCUS_STEPS)
 
 
 class BulbExposure(BaseModel):
@@ -295,6 +296,8 @@ async def set_setting(name: str, body: SettingValue):
         await _run_camera(cam.set_setting, name, body.value)
     except HTTPException:
         raise  # disconnect (503)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"no settable setting named {name!r}")
     except Exception as exc:
         log.warning("set_setting %s=%r failed: %r", name, body.value, exc)
         raise HTTPException(status_code=400, detail=str(exc))

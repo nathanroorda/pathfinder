@@ -1,5 +1,6 @@
 import contextlib
 import logging
+import math
 import os
 import threading
 import time
@@ -235,7 +236,7 @@ class Gphoto2Camera:
 
     def _drive_action(self, widget_name, value):
         widget = self._cam.get_single_config(widget_name)
-        widget.set_value(_coerce(widget.get_type(), value))
+        widget.set_value(_coerce(widget, value))
         self._cam.set_single_config(widget_name, widget)
 
     def _release_action(self, widget_name, value):
@@ -257,20 +258,14 @@ class Gphoto2Camera:
     def list_settings(self):
         with self._lock:
             self._require_open()
-            widgets = []
-            config = self._cam.get_config()
-            for section in config.get_children():
-                if section.get_name() in INCLUDE_SECTIONS:
-                    widgets += _walk(section)
-            return [_describe(w) for w in widgets
-                    if w.get_type() in _KIND and not w.get_readonly()]
+            return [_describe(w) for w in _settable_widgets(self._cam.get_config())]
 
     def set_setting(self, name, value):
         with self._lock:
             self._require_open()
             cfg = self._cam.get_config()
-            widget = cfg.get_child_by_name(name)
-            widget.set_value(_coerce(widget.get_type(), value))
+            widget = _settable_widget(cfg, name)
+            widget.set_value(_coerce(widget, value))
             self._cam.set_config(cfg)
 
     def telemetry(self):
@@ -292,6 +287,22 @@ def _walk(widget):
         else:
             result.append(child)
     return result
+
+
+def _settable_widgets(config):
+    for section in config.get_children():
+        if section.get_name() not in INCLUDE_SECTIONS:
+            continue
+        for widget in _walk(section):
+            if widget.get_type() in _KIND and not widget.get_readonly():
+                yield widget
+
+
+def _settable_widget(config, name):
+    for widget in _settable_widgets(config):
+        if widget.get_name() == name:
+            return widget
+    raise KeyError(name)
 
 
 def _describe(widget):
@@ -326,12 +337,24 @@ def _scale(fraction, size):
     return int(round(min(1.0, max(0.0, float(fraction))) * size))
 
 
-def _coerce(widget_type, value):
+def _coerce(widget, value):
+    widget_type = widget.get_type()
     if widget_type == gp.GP_WIDGET_RANGE:
-        return float(value)
+        return _within_range(widget, float(value))
     if widget_type == gp.GP_WIDGET_TOGGLE:
         return int(value)
     return str(value)
+
+
+def _within_range(widget, value):
+    low, high, _ = widget.get_range()
+    if math.isnan(value):
+        raise ValueError(f"{widget.get_name()} needs a number in {low}..{high}")
+    clamped = min(high, max(low, value))
+    if clamped != value:
+        log.warning("clamped %s from %r to %r (range %r..%r)",
+                    widget.get_name(), value, clamped, low, high)
+    return clamped
 
 
 def _quirks_for(model):

@@ -45,7 +45,7 @@ async function api(url, opts) { ... }   // fetch → throw on !ok → return par
 
 On a non-2xx response it throws an `Error` carrying the backend's `detail` field
 (FastAPI's `HTTPException` body) when present, falling back to the HTTP status
-text. That means the 503/400/409 responses described in **`app.md`** surface to
+text. That means the 503/400/404/409 responses described in **`app.md`** surface to
 the user as readable messages rather than silent failures — callers just
 `try/catch` and drop `e.message` into `#result`.
 

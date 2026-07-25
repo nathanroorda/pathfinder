@@ -1,6 +1,6 @@
 # Testing
 
-Pathfinder's test suite: 228 tests, `unittest` only, no third-party test
+Pathfinder's test suite: 242 tests, `unittest` only, no third-party test
 dependencies, and **no camera required**. The whole camera layer runs against a
 fake libgphoto2, so the suite is a normal edit-run-edit loop on a laptop rather
 than something you can only do at the rig.
@@ -21,13 +21,13 @@ tests/
 │   ├── fake_gphoto2.py   the binding: constants, GPhoto2Error, CameraFilePath
 │   └── fake_camera.py    in-memory device, widget tree, and app-layer double
 ├── test_sony_quirks.py     9   vendor/model quirk resolution
-├── test_gp2_helpers.py    30   coercion, clamping, describe, disconnect codes
-├── test_gp2_camera.py     86   Gphoto2Camera against a fake device
-├── test_app_models.py     25   request validation + the bulb ceiling
-├── test_app_routes.py     52   routes, error mapping, connection state machine
+├── test_gp2_helpers.py    37   coercion, clamping, describe, disconnect codes
+├── test_gp2_camera.py     92   Gphoto2Camera against a fake device
+├── test_app_models.py     27   request validation + the bulb ceiling
+├── test_app_routes.py     53   routes, error mapping, connection state machine
 ├── test_web_contract.py    9   web/ ↔ app.py seams (static text checks)
 ├── test_fake_fidelity.py  13   does the double still resemble the real thing
-└── test_known_gaps.py      4   TODO.md hazards, as expected-to-fail tests
+└── test_known_gaps.py      2   TODO.md hazards, as expected-to-fail tests
 ```
 
 ## Running it
@@ -48,14 +48,14 @@ handles that for you.
 
 ### On the dev host vs. on the Pi
 
-The dev machine has no pip, no venv, and no `gphoto2`/`fastapi`, so **77 tests
+The dev machine has no pip, no venv, and no `gphoto2`/`fastapi`, so **80 tests
 skip there** — everything that needs FastAPI or pydantic — plus the 5 that
-compare the fake against the real binding. The remaining 146 execute, including
+compare the fake against the real binding. The remaining 157 execute, including
 the entire camera layer:
 
 ```
-Ran 228 tests in 0.14s
-OK (skipped=82, expected failures=4)
+Ran 242 tests in 0.14s
+OK (skipped=85, expected failures=2)
 ```
 
 To run the whole suite, use the Pi's venv (created by `setup.sh`), which has the
@@ -173,6 +173,16 @@ the clamp is the only bound, since `AfPoint` accepts any float (a NaN, which
 Python's JSON parser will happily accept, collapses to 0 rather than reaching the
 body).
 
+**Values are clamped to the widget's own range.** `_coerce` takes the widget, not
+just its type, and holds a RANGE value inside the `get_range()` bounds the body
+advertises — the only bounds that know where the hardware stops. That one place
+covers `/api/focus` and every settings slider, so tests pin both paths plus the
+edges: infinities clamp, NaN raises rather than silently collapsing to a bound
+(`max(0.0, nan)` returns `0.0`, so an unchecked clamp would drive to the
+minimum), each widget is held to its *own* range, and non-RANGE widgets are left
+alone. `FocusStep`'s `MAX_FOCUS_STEPS` bound is tested separately and explicitly
+as a sanity check, not the hardware limit.
+
 **The disconnect state machine.** This is the one with a field history: a `-52`
 during capture used to repeat forever because the camera was never dropped. Tests
 cover both directions — transport codes drop the camera, release the USB claim,
@@ -199,6 +209,14 @@ widget types, or — importantly — anything from the `actions` section, where 
 shutter and focus drives live. `POST /api/settings/{name}` writes then re-reads,
 in that order, because the browser re-renders the whole panel from the response.
 
+**The write path accepts exactly what the read path offers.** Both go through
+`_settable_widgets`, so the allowlist has one definition and cannot drift. The
+tests assert that as a round trip rather than a list: *every* name
+`list_settings` returns is writable, and every action/status/read-only/
+unrenderable widget is not — including that a refused write reaches no widget at
+all, since `POST /api/settings/bulb` used to fire the shutter through an endpoint
+meant to be inert.
+
 ## Known gaps
 
 `test_known_gaps.py` holds one test per open hazard from `TODO.md`, each
@@ -208,8 +226,6 @@ written while the hazard was understood rather than months later.
 
 | Test | TODO | Asserts |
 |---|---|---|
-| `test_manual_focus_is_clamped_to_the_widget_range` | #5 | A focus step is clamped to the widget's declared range. `manualfocus` declares −7..7; `FocusStep` accepts any int and nothing narrows it, so `{"steps": 100000}` is driven verbatim at the motor. |
-| `test_settings_cannot_write_action_widgets` | #6 | The settings write path is scoped to the sections the read path exposes. Today `set_setting` resolves against the whole tree, so `POST /api/settings/bulb {"value": 1}` opens the shutter through an endpoint meant to be inert. |
 | `test_a_vendor_table_need_not_repeat_every_default` | #13 | A vendor table missing a key still yields a complete quirk set. Today `_quirks_for` returns the vendor dict as-is, so an omission is a `KeyError` inside a request handler on someone else's camera. |
 | `test_zero_retry_attempts_fails_clearly` | #34 | `capture_retry_attempts = 0` raises something that names the cause. Today the loop body never runs, the function returns `None`, and it surfaces as an `AttributeError` in `_download`. |
 

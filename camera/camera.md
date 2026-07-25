@@ -104,10 +104,19 @@ factored into `_download(path, save_dir)`, shared with `bulb()`.
 A **timed manual exposure**, for shots longer than the body's fastest bulb-less
 shutter. It writes the vendor's bulb-release action (`bulb_widget`, `"bulb"` on
 Sony) high to open the shutter, sleeps `seconds`, then writes it low to close —
-the two `_drive_action` writes are a rising then falling **edge** on the release
-line, the software analog of pressing and letting go of a cable release. The close
-is in a `finally`, so an error or cancellation mid-exposure can never strand the
-shutter open.
+a rising then falling **edge** on the release line, the software analog of
+pressing and letting go of a cable release.
+
+The falling edge goes through `_release_action` rather than `_drive_action`,
+because it is the write that strands hardware if it never lands. It retries
+`RELEASE_ATTEMPTS` times with a `RELEASE_RETRY_DELAY` backoff, logs at `ERROR`
+naming the latched widget if every attempt fails, then re-raises — so a transport
+failure propagates as a disconnect, the app drops the camera, and closing the
+handle at least releases the USB claim. If the bus is genuinely gone no retry can
+close the shutter; that residual is the reason the ceiling in #1 exists. A
+failure *during* the exposure (`except BaseException`, so `KeyboardInterrupt`
+counts) still attempts the release but keeps its own exception rather than being
+masked by the release's.
 
 The whole exposure runs under `_lock`, i.e. the sleep **holds the camera lock for
 its full duration** — deliberately: no other PTP traffic (preview, telemetry,
@@ -118,17 +127,23 @@ exposure ends — the same cost any long exposure carries.
 
 Unlike `capture()`, the body doesn't hand back a path synchronously: after the
 close it writes the frame asynchronously and announces it with a
-`GP_EVENT_FILE_ADDED` event. `_wait_for_image()` polls `wait_for_event` in 500 ms
-slices (15 s cap) for that event's `CameraFilePath`, then `_download`s it exactly
-as `capture()` does. Refused with `RuntimeError` (→ 409) while recording, or if
-`bulb_widget` is `None` (body opts out).
+`GP_EVENT_FILE_ADDED` event. `_wait_for_image(timeout)` polls `wait_for_event` in
+500 ms slices for that event's `CameraFilePath`, then `_download`s it exactly as
+`capture()` does. The deadline is `seconds + BULB_READOUT_MARGIN`, **not** a fixed
+cap: with Long Exposure NR on, the body shoots a dark frame of roughly equal
+length before the file appears, so a fixed window fails every long exposure while
+the frame lands on the card anyway. The margin covers the write itself and is a
+guess until measured on a real body. Refused with `RuntimeError` (→ 409) while
+recording, or if `bulb_widget` is `None` (body opts out).
 
 > **Body requirement:** `bulb` only opens the shutter when the body's exposure
 > mode is actually **Bulb** (shutter-speed dial / `shutterspeed` = `BULB`). The app
-> fires the release; it does not force the mode, so a bulb request in any other
-> mode does nothing useful. That's a mode gate we *could* manage later (à la
-> `_ensure_focus_mode`) if a body exposes `shutterspeed`/exposure-mode as a
-> settable widget.
+> fires the release; it does not force the mode, and — confirmed on an α7 IV
+> 2026-07-25 — does not *detect* the mode either: with the dial in `P`, driving
+> the bulb widget acts as a plain shutter release, so a 30 s request produced a
+> 1 s Program-AE frame and still returned `{"ok": true}`. Reporting success for
+> work not performed is tracked as **TODO #38**; the fix is to read the exposure
+> mode before driving and refuse (→ 409) if it isn't Bulb.
 
 ### `set_recording(on)`
 
@@ -154,7 +169,14 @@ focuses the wrong way, swap the sign at the call site or adjust the quirk — no
 change here.
 
 `autofocus()` writes the sequence in the `af_drive_values` quirk to `af_widget`,
-one `_drive_action` (fresh-config edge) per value. The generic default is a
+one fresh-config edge per value. It unpacks the sequence as `*press, release`: the
+leading values go through `_drive_action`, and the **last** one — the value that
+returns the widget to rest — goes through `_release_action`, the same
+retry-and-shout helper `bulb()` uses, and is attempted even if a press raises.
+A latched AF toggle keeps the lens hunting and blocks the next capture, so it gets
+the same fail-safe treatment as the shutter. One consequence worth knowing: on a
+body whose sequence is a single `(1,)` there is no separate release, so that lone
+trigger is what gets retried. The generic default is a
 single `(1,)`; Sony overrides it with `(1, 0)` — a **press/release**, because the
 α7 IV `autofocus` toggle idles at `2` and a lone `1` would leave the shutter in an
 AF-lock half-press. Press (1) runs AF, release (0) completes the one-shot, and
@@ -248,15 +270,24 @@ this guard rarely fires — it's the backstop for a direct API hit).
 This is what makes the UI camera-agnostic. Rather than hardcoding controls,
 Pathfinder reflects whatever the connected body exposes:
 
-- **`list_settings()`** walks the camera's config tree from `get_config()`,
-  recursing through `WINDOW`/`SECTION` container nodes (`_walk`) and keeping only
-  leaf widgets that are (a) under one of `INCLUDE_SECTIONS`
+- **`_settable_widgets(config)`** is the single definition of "a setting": it
+  walks the camera's config tree from `get_config()`, recursing through
+  `WINDOW`/`SECTION` container nodes (`_walk`) and yielding only leaf widgets
+  that are (a) under one of `INCLUDE_SECTIONS`
   = `{imgsettings, capturesettings, settings}`, (b) of a type Pathfinder knows
-  how to render, and (c) not read-only. Each survivor is turned into a plain
-  descriptor dict by `_describe`.
-- **`set_setting(name, value)`** looks the widget up by name, coerces `value` to
-  the type gphoto2 expects for that widget kind (`_coerce`), and writes it back
-  with `set_config()`.
+  how to render, and (c) not read-only.
+- **`list_settings()`** turns each of those into a plain descriptor dict by
+  `_describe`.
+- **`set_setting(name, value)`** resolves the name through `_settable_widget`
+  against that *same* generator, coerces `value` to the type gphoto2 expects for
+  that widget kind (`_coerce`), and writes it back with `set_config()`. A name
+  outside the allowlist raises `KeyError`, which `app.py` maps to **404**.
+  Having one definition shared by both paths is the point: they previously
+  drifted, and `set_setting` resolved names against the *whole* tree — so
+  `POST /api/settings/bulb` reached the shutter release through an endpoint that
+  is supposed to be inert (TODO #6, fixed and verified 2026-07-25). On the α7 IV
+  this scoping takes the writable surface from every widget in the tree down to
+  the 20 `choice` widgets the listing offers.
 - **`telemetry()`** is the read-only counterpart: it walks the same config tree
   but keeps leaf widgets under `STATUS_SECTIONS` = `{status}` — the battery,
   frames-remaining, model, serial, and lens fields the body reports but you don't
@@ -275,8 +306,18 @@ kinds — this is the vocabulary the frontend renders against:
 |---|---|---|---|
 | `RADIO`, `MENU` | `choice` | `str` | `choices: [...]` |
 | `TOGGLE` | `toggle` | `int` | — |
-| `RANGE` | `range` | `float` | `min`, `max`, `step` |
+| `RANGE` | `range` | `float`, **clamped to `get_range()`** | `min`, `max`, `step` |
 | `TEXT` | `text` | `str` | — |
+
+`_coerce` takes the **widget**, not just its type, precisely so the `RANGE` case
+can read the bounds the body advertises and hold the value inside them — the only
+bounds that know where the hardware stops. Nothing above this layer can: an
+out-of-range `/api/focus` step used to go straight to the lens motor (TODO #5).
+A clamp logs at `WARNING` naming the widget and both values, since silently
+correcting a caller hides a client bug. `NaN` is **rejected** with `ValueError`
+(→ 400) rather than clamped: `max(low, nan)` returns `low`, so an unchecked clamp
+would have driven the widget to one end of its travel. Step *granularity* is not
+enforced — an off-grid value on a step-1 widget is still sent as-is.
 
 Every descriptor carries `name`, `label`, `type`, and `value`. This shape is the
 **contract with the frontend** — `web/script.js` renders a control purely from

@@ -465,6 +465,17 @@ class ManualFocus(CameraTestCase):
         cam.manual_focus(2)
         self.assertEqual(self.driven(), [("manualfocusdrive", 2.0)])
 
+    def test_step_is_clamped_to_the_widget_range(self):
+        low, high, _ = self.device.config.get_child_by_name("manualfocus").get_range()
+
+        self.cam.manual_focus(100000)
+        self.cam.manual_focus(-100000)
+
+        self.assertEqual([v for _, v in self.driven()], [high, low])
+
+    def test_a_clamped_step_still_reports_the_focus_mode(self):
+        self.assertEqual(self.cam.manual_focus(100000), "Manual")
+
 
 class AfPoint(CameraTestCase):
     def test_centre_tap_maps_to_the_middle_of_the_af_grid(self):
@@ -548,15 +559,47 @@ class SetSetting(CameraTestCase):
         self.assertEqual(self.device.value_of("iso"), "800")
         self.assertEqual(self.device.value_of("burstnumber"), 5.0)
 
+    def test_range_sliders_are_clamped_too(self):
+        _, high, _ = self.device.config.get_child_by_name("burstnumber").get_range()
+
+        self.cam.set_setting("burstnumber", 9999)
+
+        self.assertEqual(self.device.value_of("burstnumber"), high)
+
     def test_unknown_widget_raises_instead_of_writing_something_else(self):
-        with self.assertRaises(gp.GPhoto2Error):
+        with self.assertRaises(KeyError):
             self.cam.set_setting("no-such-widget", "1")
 
         self.assertEqual(self.device.calls_named("set_config"), [])
 
-    def test_readonly_widget_write_is_refused_by_the_body(self):
-        with self.assertRaises(gp.GPhoto2Error):
+    def test_readonly_widget_is_not_settable(self):
+        with self.assertRaises(KeyError):
             self.cam.set_setting("imagequality", "JPEG")
+
+    def test_every_listed_setting_is_writable(self):
+        for setting in self.cam.list_settings():
+            with self.subTest(name=setting["name"]):
+                self.cam.set_setting(setting["name"], setting["value"])
+
+    def test_nothing_outside_the_listing_is_writable(self):
+        listed = {s["name"] for s in self.cam.list_settings()}
+
+        for name in ("bulb", "movie", "autofocus", "autofocusdrive",
+                     "manualfocus", "manualfocusdrive", "changeafarea",
+                     "batterylevel", "lensname", "imagequality",
+                     "liveviewsize", "no-such-widget"):
+            with self.subTest(name=name):
+                self.assertNotIn(name, listed)
+                with self.assertRaises(KeyError):
+                    self.cam.set_setting(name, 1)
+
+    def test_a_refused_write_reaches_no_widget(self):
+        with self.assertRaises(KeyError):
+            self.cam.set_setting("bulb", 1)
+
+        self.assertEqual(self.device.value_of("bulb"), 0)
+        self.assertEqual(self.device.calls_named("set_config"), [])
+        self.assertEqual(self.driven(), [])
 
     def test_refused_after_close(self):
         self.cam.close()

@@ -119,8 +119,20 @@ class FocusStepModel(unittest.TestCase):
                 with self.assertRaises(ValidationError):
                     app_module.FocusStep(steps=steps)
 
-    def test_step_magnitude_is_not_bounded_by_the_model(self):
-        self.assertEqual(app_module.FocusStep(steps=100000).steps, 100000)
+    def test_accepts_steps_within_the_sanity_bound(self):
+        limit = app_module.MAX_FOCUS_STEPS
+        self.assertEqual(app_module.FocusStep(steps=limit).steps, limit)
+        self.assertEqual(app_module.FocusStep(steps=-limit).steps, -limit)
+
+    def test_rejects_absurd_steps(self):
+        limit = app_module.MAX_FOCUS_STEPS
+        for steps in (limit + 1, -limit - 1, 10 ** 9):
+            with self.subTest(steps=steps):
+                with self.assertRaises(ValidationError):
+                    app_module.FocusStep(steps=steps)
+
+    def test_the_real_bound_is_the_widget_range_not_this_model(self):
+        self.assertEqual(app_module.FocusStep(steps=500).steps, 500)
 
 
 @support.requires("fastapi", "pydantic")

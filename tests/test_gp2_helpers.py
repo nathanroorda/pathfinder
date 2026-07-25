@@ -8,28 +8,68 @@ from camera import gp2, sony
 from tests.fakes.fake_camera import FakeWidget
 
 
+def widget(wtype, rng=(-7.0, 7.0, 1.0), name="w"):
+    return FakeWidget(name, wtype, rng=rng)
+
+
 class Coerce(unittest.TestCase):
     def test_range_becomes_float(self):
         for value in (3, 3.0, "3", "3.5", True):
             with self.subTest(value=value):
-                self.assertIsInstance(gp2._coerce(gp.GP_WIDGET_RANGE, value), float)
-        self.assertEqual(gp2._coerce(gp.GP_WIDGET_RANGE, "-7"), -7.0)
+                self.assertIsInstance(
+                    gp2._coerce(widget(gp.GP_WIDGET_RANGE), value), float)
+        self.assertEqual(gp2._coerce(widget(gp.GP_WIDGET_RANGE), "-7"), -7.0)
 
     def test_toggle_becomes_int(self):
-        self.assertEqual(gp2._coerce(gp.GP_WIDGET_TOGGLE, True), 1)
-        self.assertEqual(gp2._coerce(gp.GP_WIDGET_TOGGLE, False), 0)
-        self.assertEqual(gp2._coerce(gp.GP_WIDGET_TOGGLE, "1"), 1)
-        self.assertIsInstance(gp2._coerce(gp.GP_WIDGET_TOGGLE, 1.0), int)
+        toggle = widget(gp.GP_WIDGET_TOGGLE)
+        self.assertEqual(gp2._coerce(toggle, True), 1)
+        self.assertEqual(gp2._coerce(toggle, False), 0)
+        self.assertEqual(gp2._coerce(toggle, "1"), 1)
+        self.assertIsInstance(gp2._coerce(toggle, 1.0), int)
 
     def test_everything_else_becomes_str(self):
         for wtype in (gp.GP_WIDGET_RADIO, gp.GP_WIDGET_MENU, gp.GP_WIDGET_TEXT):
             with self.subTest(wtype=wtype):
-                self.assertEqual(gp2._coerce(wtype, 400), "400")
-                self.assertEqual(gp2._coerce(wtype, "f/2.8"), "f/2.8")
+                self.assertEqual(gp2._coerce(widget(wtype), 400), "400")
+                self.assertEqual(gp2._coerce(widget(wtype), "f/2.8"), "f/2.8")
 
     def test_uncoercible_value_raises_rather_than_reaching_usb(self):
         with self.assertRaises(ValueError):
-            gp2._coerce(gp.GP_WIDGET_RANGE, "not-a-number")
+            gp2._coerce(widget(gp.GP_WIDGET_RANGE), "not-a-number")
+
+
+class RangeClamping(unittest.TestCase):
+    def test_values_inside_the_range_pass_through(self):
+        for value in (-7, -3.5, 0, 7):
+            with self.subTest(value=value):
+                self.assertEqual(gp2._coerce(widget(gp.GP_WIDGET_RANGE), value), float(value))
+
+    def test_values_outside_the_range_are_clamped_to_it(self):
+        self.assertEqual(gp2._coerce(widget(gp.GP_WIDGET_RANGE), 100000), 7.0)
+        self.assertEqual(gp2._coerce(widget(gp.GP_WIDGET_RANGE), -100000), -7.0)
+
+    def test_infinities_are_clamped_rather_than_reaching_the_motor(self):
+        self.assertEqual(gp2._coerce(widget(gp.GP_WIDGET_RANGE), float("inf")), 7.0)
+        self.assertEqual(gp2._coerce(widget(gp.GP_WIDGET_RANGE), float("-inf")), -7.0)
+
+    def test_nan_is_rejected_rather_than_collapsing_to_a_bound(self):
+        with self.assertRaises(ValueError):
+            gp2._coerce(widget(gp.GP_WIDGET_RANGE), float("nan"))
+
+    def test_clamping_is_logged(self):
+        with self.assertLogs("camera.gp2", level="WARNING") as captured:
+            gp2._coerce(widget(gp.GP_WIDGET_RANGE, name="manualfocus"), 100000)
+        self.assertIn("manualfocus", "\n".join(captured.output))
+
+    def test_each_widget_is_clamped_to_its_own_declared_range(self):
+        self.assertEqual(
+            gp2._coerce(widget(gp.GP_WIDGET_RANGE, rng=(1.0, 10.0, 1.0)), 99), 10.0)
+        self.assertEqual(
+            gp2._coerce(widget(gp.GP_WIDGET_RANGE, rng=(0.0, 255.0, 1.0)), 99), 99.0)
+
+    def test_non_range_widgets_are_not_clamped(self):
+        self.assertEqual(gp2._coerce(widget(gp.GP_WIDGET_TEXT), 100000), "100000")
+        self.assertEqual(gp2._coerce(widget(gp.GP_WIDGET_TOGGLE), 100000), 100000)
 
 
 class Scale(unittest.TestCase):

@@ -161,8 +161,46 @@ Line numbers refer to the state of the tree at commit `da23621`.
   treat the "return to idle" write as best-effort-with-retry.
 - **See also:** #17 — the a7 IV's `autofocus` toggle idles at `2`, not `0`.
 
-### 5. 🟠 No server-side clamping of RANGE widgets — `/api/focus` can drive the lens past its stops
+### 5. ✅ FIXED — No server-side clamping of RANGE widgets — `/api/focus` can drive the lens past its stops
 
+- **Status:** Fixed and **verified on hardware** 2026-07-25. `_coerce` now takes
+  the *widget* rather than just its type, and a RANGE value is held inside the
+  widget's own `get_range()` bounds, logging `clamped <widget> from … to …`
+  whenever it bites. `FocusStep.steps` gained
+  `Field(ge=-MAX_FOCUS_STEPS, le=MAX_FOCUS_STEPS)` (10000) as the
+  defence-in-depth bound — deliberately generous, since the real limit is
+  per-body and lives in the widget.
+- **Verified on the a7 IV** via `/api/focus`: `3` → 200 with **no** clamp line
+  (in-range passes through untouched); `500` → 200 +
+  `clamped manualfocus from 500.0 to 7.0 (range -7.0..7.0)`; `-500` → 200 +
+  clamped to `-7.0`; `10000` (the inclusive model bound) → 200 + clamped to
+  `7.0`, showing both layers doing their separate jobs; `100000` → 422 at the
+  model with nothing reaching the camera. The body's reported range
+  (`-7.0..7.0`) matches what `tests/fakes/fake_camera.py` assumes.
+- **Not verifiable on this body:** the a7 IV exposes **20 settings, all
+  `choice`** — no RANGE widgets at all in `INCLUDE_SECTIONS` — so the settings
+  slider path through `set_setting` has nothing to exercise it here, and neither
+  does the NaN branch (`/api/focus` can't reach it: `FocusStep.steps` is an
+  `int`, so a NaN is a 422 at the model). Both are unit-covered only, until a
+  camera with sliders is tested.
+- **NaN:** rejected with `ValueError` (→400) rather than clamped. `max(low, nan)`
+  returns `low`, so an unchecked clamp would have silently driven the lens to one
+  end of its travel — and `SettingValue.value` accepts a float, which Python's
+  JSON parser will happily produce from a bare `NaN` token.
+- **Test:** promoted out of `test_known_gaps.py` into
+  `tests/test_gp2_helpers.py::RangeClamping` (bounds, infinities, NaN, per-widget
+  ranges, non-RANGE widgets untouched) plus end-to-end coverage in
+  `test_gp2_camera.py::ManualFocus` and `::SetSetting`. Verified to fail against
+  the pre-fix code (12 failures).
+- **To verify on the rig:** `POST /api/focus {"steps": 500}` — inside the model
+  bound, far outside the a7 IV's ±7 — should return 200, move the lens by one
+  full step, and log `clamped manualfocus from 500.0 to 7.0`. `{"steps": 100000}`
+  should now 422 at the model instead. Also confirm a settings slider clamps:
+  `POST /api/settings/burstnumber {"value": 9999}`.
+- **Still open:** the widget's `step` granularity is ignored — we clamp to
+  `low..high` but never snap to the grid, so an off-grid value like `3.5` on a
+  step-1 widget is still sent as-is. Unknown whether the a7 IV rounds or rejects;
+  worth checking during the next rig session.
 - **Where:** `app.py:24-25` (`FocusStep`), `camera/gp2.py:189-195`,
   `camera/gp2.py:296-301` (`_coerce`)
 - **Issue:** `FocusStep.steps` is an unbounded `int`. `_coerce` does `float(value)`
@@ -178,12 +216,36 @@ Line numbers refer to the state of the tree at commit `da23621`.
 - **Fix:** In `_coerce`, take the widget (not just its type), read
   `lo, hi, step = widget.get_range()`, and clamp. Bound `FocusStep.steps` with a
   `Field(ge=…, le=…)` as defence in depth.
-- **Test:** acceptance test waiting at
-  `tests/test_known_gaps.py::RangeClamping` (expected-failure; fixing this makes
-  the run red with an *unexpected success* — that is the cue to promote it into
-  `tests/test_gp2_camera.py`).
 
-### 6. 🟠 `POST /api/settings/{name}` can write *any* widget in the tree
+### 6. ✅ FIXED — `POST /api/settings/{name}` can write *any* widget in the tree
+
+- **Status:** Fixed and **verified on hardware** 2026-07-25.
+  `_settable_widgets(config)` is now the single
+  definition of "a setting" and both paths use it: `list_settings` describes what
+  it yields, `set_setting` resolves the name through `_settable_widget` against
+  the same generator. The allowlist can no longer drift because there is only one
+  of it. An unmatched name raises `KeyError`, which `app.py` maps to **404**
+  (distinct from 400 "bad value") without dropping the connection.
+- **Blast radius, measured 2026-07-25:** on the a7 IV this takes the writable
+  surface from every widget in the tree down to the **20 `choice` widgets** the
+  listing offers. Read-only widgets, `GP_WIDGET_BUTTON`s, everything in `status`,
+  and every drive in `actions` — `bulb`, `movie`, `autofocus`, `manualfocus`,
+  `changeafarea` — are now unreachable through this endpoint.
+- **Test:** promoted out of `test_known_gaps.py` into
+  `tests/test_gp2_camera.py::SetSetting`, asserted as a round trip rather than a
+  list: every name `list_settings` returns is writable, nothing else is, and a
+  refused write reaches no widget at all. Route-level 404 covered in
+  `test_app_routes.py::Settings`. Verified to fail against the pre-fix code.
+- **Verified on the a7 IV 2026-07-25, with a live before/after on the identical
+  request.** Against the pre-fix service, `POST /api/settings/bulb {"value": 1}`
+  returned **200**, fired the shutter, and the refreshed listing came back with
+  **2 widgets instead of 20** — the body had gone busy and dropped nearly its
+  whole config surface, so the endpoint returned a near-empty settings panel as
+  a side effect of taking a photograph. Against the fixed service the same
+  request returns `404 {"detail":"no settable setting named 'bulb'"}` and touches
+  nothing. Also 404: `manualfocus` (an `actions` widget) and `batterylevel` (a
+  `status` widget). `shuttertype` — a genuine listed setting — still returns 200
+  with the full 20-item list, confirming the allowlist is not drawn too tight.
 
 - **Where:** `app.py:271-281` → `camera/gp2.py:235-241`
 - **Issue:** `list_settings()` carefully filters to `INCLUDE_SECTIONS` and drops
@@ -207,10 +269,6 @@ Line numbers refer to the state of the tree at commit `da23621`.
                   return w
       raise KeyError(name)
   ```
-- **Test:** acceptance test waiting at
-  `tests/test_known_gaps.py::SettingsScope` (expected-failure). Note the test
-  drives `set_setting("bulb", 1)` directly — this endpoint can currently fire
-  the shutter.
 
 ---
 
@@ -712,25 +770,24 @@ These are the places it's weaker than it looks.
 
 ## Suggested order
 
-**Done:** #1 (verified), #37 (verified). #2, #3, #4 have fixes applied and unit
-coverage but are 🧪 — see "blocked" below.
+**Done:** #1, #5, #6, #37 (all verified on hardware). #2, #3, #4 have fixes
+applied and unit coverage but are 🧪 — dial-blocked, see below.
 
 **Blocked on physical access to the camera's mode dial** (needs M + BULB, and
 Long Exposure NR on): verifying #2, #3, and #38. Nothing else depends on this,
 so it is not on the critical path — do the items below while it waits.
 
-1. **#5** — clamp RANGE widgets in `_coerce` (protects the focus motor *and* every slider)
-2. **#6** — validate the settings widget name
-3. **#38** — refuse `bulb` when the body is not in BULB (the discovery command is
+1. **#38** — refuse `bulb` when the body is not in BULB (the discovery command is
    in that item; it needs the dial too, but only to *read* one value)
-4. **#7** — bound `_drain_events`
-5. **#8** — bounded lock acquisition + `WatchdogSec` (turns hangs into restarts)
-6. **#13, #14** — quirk layering and vendor contract, **before** adding Canon/Nikon
-7. **#17** — verify `changeafarea` / `bulb` / AF idle value on the rig
+2. **#7** — bound `_drain_events`
+3. **#8** — bounded lock acquisition + `WatchdogSec` (turns hangs into restarts)
+4. **#13, #14** — quirk layering and vendor contract, **before** adding Canon/Nikon
+5. **#17** — verify `changeafarea` / `bulb` / AF idle value on the rig
    (batch this with the #2/#3/#38 dial session — same setup, one trip)
-8. **#9** — compare-and-swap in `_drop_camera`
-9. **#10** — single shared liveview producer (largest change; what makes multi-client work)
-10. Everything else, opportunistically
+6. **#9** — compare-and-swap in `_drop_camera`
+7. **#10** — single shared liveview producer (largest change; what makes multi-client work)
+8. Everything else, opportunistically
 
-#5, #6, #13 and #34 each have an `@expectedFailure` acceptance test already
-written in `tests/test_known_gaps.py` — start there.
+#13 and #34 each have an `@expectedFailure` acceptance test already written in
+`tests/test_known_gaps.py` — start there. #5's and #6's have been promoted into
+the main suite now that they pass.
