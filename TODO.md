@@ -12,8 +12,17 @@ Line numbers refer to the state of the tree at commit `da23621`.
 
 ## Tier 1 — Fix first (small, localized, physical-hardware risk)
 
-### 1. 🔴 Bulb exposure length is unvalidated — can lock the device with the shutter open
+### 1. ✅ FIXED — Bulb exposure length is unvalidated — can lock the device with the shutter open
 
+- **Status:** Fixed and **verified on hardware** 2026-07-25.
+  `BulbExposure.seconds` is now `Field(gt=0, le=MAX_BULB_SECONDS,
+  allow_inf_nan=False)`, bound configurable via `PATHFINDER_MAX_BULB_SECONDS`
+  (default 900s). Verified on the Pi: `0`, `-1`, `1e9`, `inf`, `nan`, `900.1` all
+  rejected; `1` and `900` accepted (`le` boundary inclusive as intended). Live
+  service returns 422 for `1e9`. The client-side `api()` helper now flattens
+  FastAPI's array-shaped 422 `detail` — response confirmed to be
+  `{"detail":[{"type","loc","msg",...}]}`. Worst case is now a bounded 900s lock,
+  not unbounded — the lock-holding itself remains #8/#10.
 - **Where:** `app.py:28-29` (`BulbExposure`), `camera/gp2.py:101-121`
 - **Issue:** `BulbExposure.seconds` is a bare `float`. The browser checks `> 0`
   (`web/script.js:165`); the server checks nothing. `POST /api/bulb {"seconds": 1e9}`

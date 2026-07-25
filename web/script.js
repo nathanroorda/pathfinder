@@ -14,9 +14,15 @@ const bulbBtn = document.getElementById("bulbBtn");
 const bulbSecondsEl = document.getElementById("bulbSeconds");
 const afMarker = document.getElementById("afMarker");
 
+function errorMessage(body, fallback) {
+  const detail = body && body.detail;
+  if (Array.isArray(detail)) return detail.map((d) => d.msg).join("; ") || fallback;
+  return detail || fallback;
+}
+
 async function api(url, opts) {
   const r = await fetch(url, opts);
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  if (!r.ok) throw new Error(errorMessage(await r.json().catch(() => ({})), r.statusText));
   return r.json();
 }
 

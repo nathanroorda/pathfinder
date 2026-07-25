@@ -8,13 +8,33 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 os.environ.setdefault("LD_LIBRARY_PATH", "/usr/local/lib")
 
 import camera
 
 log = logging.getLogger(__name__)
+
+DEFAULT_MAX_BULB_SECONDS = 900.0
+
+
+def _max_bulb_seconds() -> float:
+    raw = os.environ.get("PATHFINDER_MAX_BULB_SECONDS")
+    if raw is None:
+        return DEFAULT_MAX_BULB_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        value = float("nan")
+    if not 0 < value < float("inf"):
+        log.warning("ignoring invalid PATHFINDER_MAX_BULB_SECONDS=%r; using %.0fs",
+                    raw, DEFAULT_MAX_BULB_SECONDS)
+        return DEFAULT_MAX_BULB_SECONDS
+    return value
+
+
+MAX_BULB_SECONDS = _max_bulb_seconds()
 
 
 class SettingValue(BaseModel):
@@ -26,7 +46,7 @@ class FocusStep(BaseModel):
 
 
 class BulbExposure(BaseModel):
-    seconds: float
+    seconds: float = Field(gt=0, le=MAX_BULB_SECONDS, allow_inf_nan=False)
 
 
 class AfPoint(BaseModel):
