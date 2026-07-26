@@ -110,6 +110,7 @@ class FakeDevice:
         self.exit_count = 0
         self.abilities_error = None
         self.init_error = None
+        self.event_poll_cost = 0.01
         self.image_bytes = b"\xff\xd8\xff\xe0raw-image-data"
 
     def _record(self, method, *args):
@@ -161,9 +162,12 @@ class FakeDevice:
     def wait_for_event(self, timeout_ms):
         self._record("wait_for_event", timeout_ms)
         if self.events:
-            return _next(self.events, None)
+            event = _next(self.events, None)
+            if self.clock is not None:
+                self.clock.advance(self.event_poll_cost)
+            return event
         if self.clock is not None:
-            self.clock.advance(timeout_ms / 1000.0)  # so deadline polls terminate
+            self.clock.advance(timeout_ms / 1000.0)
         return (gp.GP_EVENT_TIMEOUT, None)
 
     def get_abilities(self):

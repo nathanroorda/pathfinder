@@ -16,6 +16,8 @@ CAPTURE_DIR = os.environ.get("PATHFINDER_CAPTURE_DIR", "captures")
 RELEASE_ATTEMPTS = 3
 RELEASE_RETRY_DELAY = 0.2
 BULB_READOUT_MARGIN = 15.0
+DRAIN_TIMEOUT = 1.0
+DRAIN_POLL_MS = 200
 
 DEFAULT_QUIRKS = {
     "shot_gap": 0.0,
@@ -154,12 +156,17 @@ class Gphoto2Camera:
             camera_file = self._cam.capture_preview()
             return bytes(camera_file.get_data_and_size())
 
-    def _drain_events(self, timeout_ms=200):
+    def _drain_events(self, timeout=DRAIN_TIMEOUT, poll_ms=DRAIN_POLL_MS):
+        deadline = time.monotonic() + timeout
         try:
-            while self._cam.wait_for_event(timeout_ms)[0] != gp.GP_EVENT_TIMEOUT:
-                pass
-        except gp.GPhoto2Error:
-            pass
+            while time.monotonic() < deadline:
+                if self._cam.wait_for_event(poll_ms)[0] == gp.GP_EVENT_TIMEOUT:
+                    return
+            log.warning("event queue still busy after %.1fs — continuing with "
+                        "events pending", timeout)
+        except gp.GPhoto2Error as exc:
+            log.log(logging.WARNING if is_disconnect_error(exc) else logging.DEBUG,
+                    "draining events failed: %r", exc)
 
     def _capture_with_retry(self):
         attempts = self._quirks["capture_retry_attempts"]

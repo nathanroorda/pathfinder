@@ -1,6 +1,6 @@
 # Testing
 
-Pathfinder's test suite: 242 tests, `unittest` only, no third-party test
+Pathfinder's test suite: 251 tests, `unittest` only, no third-party test
 dependencies, and **no camera required**. The whole camera layer runs against a
 fake libgphoto2, so the suite is a normal edit-run-edit loop on a laptop rather
 than something you can only do at the rig.
@@ -22,7 +22,7 @@ tests/
 │   └── fake_camera.py    in-memory device, widget tree, and app-layer double
 ├── test_sony_quirks.py     9   vendor/model quirk resolution
 ├── test_gp2_helpers.py    37   coercion, clamping, describe, disconnect codes
-├── test_gp2_camera.py     92   Gphoto2Camera against a fake device
+├── test_gp2_camera.py    101   Gphoto2Camera against a fake device
 ├── test_app_models.py     27   request validation + the bulb ceiling
 ├── test_app_routes.py     53   routes, error mapping, connection state machine
 ├── test_web_contract.py    9   web/ ↔ app.py seams (static text checks)
@@ -50,11 +50,11 @@ handles that for you.
 
 The dev machine has no pip, no venv, and no `gphoto2`/`fastapi`, so **80 tests
 skip there** — everything that needs FastAPI or pydantic — plus the 5 that
-compare the fake against the real binding. The remaining 157 execute, including
+compare the fake against the real binding. The remaining 166 execute, including
 the entire camera layer:
 
 ```
-Ran 242 tests in 0.14s
+Ran 251 tests in 0.18s
 OK (skipped=85, expected failures=2)
 ```
 
@@ -128,6 +128,16 @@ Failure injection, which is most of what the tests are built on:
 | `hook(method, *args)` | called at the top of every device method — raise on the Nth call, or inspect state mid-operation |
 | `support.FakeClock` | replaces the `time` module *inside* `camera.gp2`, making shot-gap and exposure-length assertions exact instead of wall-clock flaky |
 
+`FakeClock` only moves when something moves it, so `wait_for_event` advances it
+on every call — by the full `timeout_ms` when the queue is empty, by
+`event_poll_cost` when an event returns early. Both branches have to cost
+something: the drain and readout loops are `while time.monotonic() < deadline`,
+so a free poll is an infinite loop in the test rather than a failing assertion.
+That fragility is why `test_the_bound_holds_on_the_real_clock` exists — it hands
+the drain the genuine `time` module and a 50 ms timeout, so if the fake ever
+stops paying for polls, one test still *fails* instead of every drain test
+hanging. Cheap insurance against the one failure mode a suite can't report.
+
 The `hook` is how the lock-holding tests work: they check the mutex from inside a
 driven write, which is the only place that question can honestly be asked. It is
 also how `Bulb` delivers its `GP_EVENT_FILE_ADDED` on the shutter's release edge
@@ -163,6 +173,20 @@ a fixed timeout would report failure on every long exposure while the frame
 quietly landed on the card. The deadline is `seconds + BULB_READOUT_MARGIN`, and
 tests pin both that it scales and that it still terminates rather than spinning on
 the bus holding the mutex.
+
+**Every wait on the body has a deadline.** `_drain_events` used to loop until the
+camera volunteered a `GP_EVENT_TIMEOUT`, which a Sony streaming
+property-change events never does — with `_lock` held, so the hang took every
+other request with it. The tests pin the bound rather than the loop: a body whose
+queue never empties (the `endless_events` hook re-arms an event on every poll)
+still returns inside `DRAIN_TIMEOUT`, says so at `WARNING`, and leaves the mutex
+free, while a body that *does* go quiet stops at the first quiet poll and is not
+warned about. The failure this replaces is why `FakeDevice.wait_for_event`
+charges clock time in both branches: a fake where polling is free would let a
+deadline loop spin forever in-process, and the test would hang instead of fail.
+A transport error during a drain is asserted to be *logged and swallowed* — the
+capture that follows is where a dead bus gets attributed to a request, and it is
+still checked to reach the caller from there.
 
 **Writes reach the body correctly typed and in order.** `_coerce` is the boundary
 between JSON and libgphoto2's C types, and a float where an int belongs is

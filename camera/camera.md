@@ -82,8 +82,23 @@ Runs entirely under `_lock`, in four steps:
    interval since `_last_shot`, so rapid taps don't outrun what the body can
    handle.
 2. **`_drain_events()`** — flush any queued camera events first
-   (`wait_for_event` until `GP_EVENT_TIMEOUT`); stale events left in the queue
-   can otherwise interfere with the capture call on some bodies.
+   (`wait_for_event` in `DRAIN_POLL_MS` slices until `GP_EVENT_TIMEOUT`); stale
+   events left in the queue can otherwise interfere with the capture call on
+   some bodies. **Bounded by a `DRAIN_TIMEOUT` (1s) deadline**, because the
+   *body* decides when the queue runs dry: a Sony streaming property-change
+   events — a dial being turned, some live-view states — never sends the timeout
+   event, and this loop runs with `_lock` held, so an unbounded wait parks every
+   other request behind it (TODO #7). On expiry it logs at `WARNING` and
+   proceeds with events still queued; finishing the capture matters more than a
+   perfectly empty queue, and a hang here is indistinguishable from a bricked
+   device. Same reasoning as never polling a status register without a timeout —
+   the peripheral is allowed to misbehave, your loop is not.
+   A `GPhoto2Error` while draining is logged (at `WARNING` if
+   `is_disconnect_error()` claims it, `DEBUG` otherwise) but **not** re-raised:
+   the drain is hygiene the caller didn't ask for, and the capture that follows
+   hits the same dead bus and raises there, where it can be attributed to a
+   request. Raising here would also abort the retry in step 3 on the strength of
+   a failed *pre*-op read.
 3. **`_capture_with_retry()`** — call `capture(GP_CAPTURE_IMAGE)`, retrying up to
    `capture_retry_attempts` times on a generic `GP_ERROR`, with a 1s backoff and
    another event drain between tries. Transport-level errors are *not* retried

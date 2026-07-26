@@ -182,6 +182,87 @@ class CaptureRetry(CameraTestCase):
         self.assertEqual(len(self.device.calls_named("capture")), 1)
 
 
+class DrainEvents(CameraTestCase):
+    def endless_events(self, event=None):
+        event = event or (gp.GP_EVENT_UNKNOWN, None)
+
+        def hook(method, *args):
+            if method == "wait_for_event":
+                self.device.events.append(event)
+        self.device.hook = hook
+
+    def test_drains_the_queue_then_stops_at_the_first_quiet_poll(self):
+        self.device.events = [(gp.GP_EVENT_UNKNOWN, None),
+                              (gp.GP_EVENT_CAPTURE_COMPLETE, None)]
+
+        self.cam._drain_events()
+
+        self.assertEqual(self.device.events, [])
+        self.assertEqual(len(self.device.calls_named("wait_for_event")), 3)
+
+    def test_a_body_that_never_goes_quiet_does_not_hang_the_drain(self):
+        self.endless_events()
+        start = self.clock.monotonic()
+
+        self.cam._drain_events()
+
+        self.assertLess(self.clock.monotonic() - start, gp2.DRAIN_TIMEOUT + 1.0)
+
+    def test_the_bound_holds_on_the_real_clock(self):
+        import time as real_time
+
+        self.endless_events()
+
+        with mock.patch.object(gp2, "time", real_time):
+            start = real_time.monotonic()
+            self.cam._drain_events(timeout=0.05)
+            elapsed = real_time.monotonic() - start
+
+        self.assertLess(elapsed, 1.0)
+
+    def test_giving_up_on_a_noisy_body_is_logged(self):
+        self.endless_events()
+
+        with self.assertLogs("camera.gp2", level="WARNING") as captured:
+            self.cam._drain_events()
+
+        self.assertIn("events pending", "\n".join(captured.output))
+
+    def test_the_bus_mutex_is_released_even_by_a_noisy_body(self):
+        self.endless_events()
+
+        self.cam.capture(save_dir=self.save_dir)
+
+        self.assertFalse(lock_is_held(self.cam))
+
+    def test_a_quiet_body_is_not_logged_about(self):
+        with self.assertNoLogs("camera.gp2", level="WARNING"):
+            self.cam._drain_events()
+
+    def test_a_dead_bus_is_logged_rather_than_swallowed(self):
+        self.device.events = [gp.GPhoto2Error(gp.GP_ERROR_IO_USB_FIND)]
+
+        with self.assertLogs("camera.gp2", level="WARNING") as captured:
+            self.cam._drain_events()
+
+        self.assertIn("draining events failed", "\n".join(captured.output))
+
+    def test_a_drain_failure_is_left_for_the_operation_that_follows(self):
+        self.device.events = [gp.GPhoto2Error(gp.GP_ERROR_IO_USB_FIND)]
+        self.device.capture_results = [gp.GPhoto2Error(gp.GP_ERROR_IO_USB_FIND)]
+
+        with self.assertRaises(gp.GPhoto2Error) as caught:
+            self.cam.capture(save_dir=self.save_dir)
+
+        self.assertTrue(gp2.is_disconnect_error(caught.exception))
+
+    def test_a_logical_error_while_draining_is_not_shouted_about(self):
+        self.device.events = [gp.GPhoto2Error(gp.GP_ERROR_NOT_SUPPORTED)]
+
+        with self.assertNoLogs("camera.gp2", level="WARNING"):
+            self.cam._drain_events()
+
+
 class Bulb(CameraTestCase):
     def _deliver_image_on_release(self, after_failures=0):
         # Queued only on release; a pre-queued event would be eaten by the pre-exposure drain.

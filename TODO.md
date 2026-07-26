@@ -274,8 +274,85 @@ Line numbers refer to the state of the tree at commit `da23621`.
 
 ## Tier 2 — Robustness of the camera layer
 
-### 7. 🟠 `_drain_events` can spin forever holding the lock
+### 7. 🧪 `_drain_events` can spin forever holding the lock
 
+- **Status:** Fix applied 2026-07-26 — **not yet verified on hardware.**
+  `_drain_events(timeout=DRAIN_TIMEOUT, poll_ms=DRAIN_POLL_MS)` now runs against
+  a `time.monotonic()` deadline (1.0s, polling in 200ms slices) instead of
+  looping until the body volunteers a `GP_EVENT_TIMEOUT`. On expiry it logs
+  `WARNING event queue still busy after 1.0s — continuing with events pending`
+  and returns, so the lock is always released and the capture proceeds. A
+  `GPhoto2Error` while draining is still swallowed — deliberately, see below —
+  but now logged: `WARNING` if `is_disconnect_error()` classifies it, `DEBUG`
+  otherwise. Unit-covered by `tests/test_gp2_camera.py::DrainEvents` (9 tests),
+  including `test_the_bound_holds_on_the_real_clock`, which runs the drain
+  against the genuine `time` module rather than `FakeClock` — without it, a fake
+  that stopped charging for polls would make the drain tests *hang* instead of
+  fail.
+- **Suite status:** green on the Pi 2026-07-26 under `.venv/bin/python` —
+  `Ran 251 tests in 1.328s … OK (expected failures=2)`, **zero skips**. That
+  confirms the change is sound against the real bindings and broke nothing
+  (the fake-device clock accounting it touches underpins the route tests too).
+  It says nothing about the camera: no unit test can tell you whether the α7 IV
+  ever streams the events this bound exists for. That is the rig question below.
+- **Why the drain still swallows transport errors:** the drain is best-effort
+  hygiene, not an operation the caller asked for. The capture/bulb that follows
+  hits the same dead bus and raises there, where the error can be attributed to
+  a request — and `_capture_with_retry` calls the drain *between* attempts, so
+  raising would abort a retry that might otherwise succeed. Verified by
+  `test_a_drain_failure_is_left_for_the_operation_that_follows`: the disconnect
+  still reaches the caller as a 503, just from the capture rather than the drain.
+- **To verify — read this order, the first step decides whether the rest is
+  meaningful.** A clean capture with no warning is *not* a pass on its own: if
+  this body never streams events, the drain never spun pre-fix either and you
+  have measured nothing. That is the shape of the void run under #3.
+  1. **Census — is the α7 IV noisy at all?** Needs the USB claim, so stop the
+     service. Spin the rear/front command dial (in M), the exposure-comp dial
+     and the mode dial continuously for the whole window:
+     ```bash
+     sudo systemctl stop pathfinder
+     gphoto2 --wait-event=20s        # prints each event as it arrives
+     sudo systemctl start pathfinder
+     ```
+     Property-change events appearing → the hazard is real here, continue to 2.
+     Only timeouts for 20s → **record that and stop**: the bound is defensive on
+     this body, #7 stays 🧪 as "not reproducible on the α7 IV," and that same
+     answer tells you whether #3's orphaned-`FILE_ADDED` desync can happen here.
+  2. **Reproduce the hang, then show it gone.** Emulate the pre-fix code with a
+     one-line edit rather than a revert — the constant *is* the difference. Set
+     `DRAIN_TIMEOUT = 3600.0` in `camera/gp2.py`, `sudo systemctl restart
+     pathfinder`, start spinning the dial, keep spinning, then
+     `time curl -s -X POST localhost:8080/api/capture`. Pass = **it hangs**;
+     that is the bug. Ctrl-C on curl won't free the worker —
+     `sudo systemctl restart pathfinder` to recover, and don't leave 3600 in
+     place, since every other route parks behind the held lock. Restore `1.0`,
+     restart, repeat the same dial-spinning: the capture should complete, at
+     worst ~1s slower than baseline, logging `event queue still busy after 1.0s`.
+  3. **The disconnect branch** (new logging from this fix; batch with #2's
+     USB-pull session). Close the browser tab first — its telemetry polling will
+     drop the camera before your request lands. Pull the cable while idle, then
+     `curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8080/api/capture`.
+     The drain is the first bus call in `capture()`, so expect
+     `WARNING draining events failed: …` → `camera connection lost … dropping`
+     → **503**, and reconnect within ~3s of replugging. If `wait_for_event`
+     returns a clean timeout on a dead handle instead of raising, you get the
+     503 with no drain line — inconclusive for this branch, not a failure.
+  4. **Baseline/regression, service running:** several ordinary captures,
+     including back-to-back ones (`shot_gap` 1.5s, the case most likely to find
+     leftover events). Pass: normal wall time, `ok:true`, and **no**
+     `events pending` line. That warning appearing in ordinary use means 1.0s is
+     too tight for this body and `DRAIN_TIMEOUT` belongs in the quirk table as
+     per-body timing, not a module constant.
+
+  Watch throughout with:
+  ```bash
+  journalctl -u pathfinder -f | grep --line-buffered -E 'drain|events pending|connection lost'
+  ```
+- **Still open:** giving up leaves events queued, which is the same event-stream
+  desync #3 describes — one orphaned `FILE_ADDED` can still be consumed by a
+  later capture's drain. Bounding the wait stops the hang; it doesn't make the
+  queue coherent. The real fix is to match events to the operation that caused
+  them rather than flushing blindly.
 - **Where:** `camera/gp2.py:146-151`
 - **Issue:**
   ```python
@@ -723,19 +800,24 @@ These are the places it's weaker than it looks.
 
 ### 37. ✅ FIXED — No tests
 
-- **Status:** Fixed 2026-07-25. `tests/` — 228 tests, stdlib `unittest`, no
-  third-party test dependencies. A fake `gphoto2` binding (`tests/fakes/`) is
-  installed into `sys.modules` before `camera` is imported, so the whole camera
-  layer runs with no libgphoto2 and no camera attached (139 of 228 execute on
-  the dev host, which has no pip). Covers exactly what this item asked for:
-  quirk resolution, `_coerce`, the error→HTTP-status mapping, and the
-  disconnect/reconnect state machine. Verified green on the Pi under
-  `.venv/bin/python` — `Ran 228 tests … OK (expected failures=4)` with **zero
-  skips**, so the FastAPI tests and the fake-vs-real-binding fidelity checks all
-  ran. See `tests/tests.md`.
+- **Status:** Fixed 2026-07-25. `tests/` — **251 tests** (228 at the time of the
+  fix), stdlib `unittest`, no third-party test dependencies. A fake `gphoto2`
+  binding (`tests/fakes/`) is installed into `sys.modules` before `camera` is
+  imported, so the whole camera layer runs with no libgphoto2 and no camera
+  attached (166 of 251 execute on the dev host, which has no pip). Covers
+  exactly what this item asked for: quirk resolution, `_coerce`, the
+  error→HTTP-status mapping, and the disconnect/reconnect state machine. See
+  `tests/tests.md`.
+- **Last full run on the Pi, 2026-07-26** (under `.venv/bin/python`, after the
+  #7 fix): `Ran 251 tests in 1.328s … OK (expected failures=2)` with **zero
+  skips** — so the FastAPI/pydantic tests and the fake-vs-real-binding fidelity
+  checks all executed against the genuine binding, not just the dev host's 166.
+  The two expected failures are the remaining `test_known_gaps.py` items (#13,
+  #34); they were 4 before #5 and #6 were promoted into the main suite.
 - **Note:** `tests/test_known_gaps.py` holds an `@expectedFailure` acceptance
-  test for each of #5, #6, #13 and #34. Fixing one of those makes the suite red
-  with an *unexpected success* — the cue to promote the test, not a regression.
+  test for each remaining hazard — now #13 and #34, after #5's and #6's were
+  promoted. Fixing one makes the suite red with an *unexpected success* — the
+  cue to promote the test, not a regression.
 - **Still open:** the libgphoto2 `vusb` dummy driver is unused, so nothing
   exercises the real binding end-to-end; there is no CI (the suite needs only
   `fastapi`+`pydantic`, so this is cheap); and the frontend has only static
@@ -770,8 +852,9 @@ These are the places it's weaker than it looks.
 
 ## Suggested order
 
-**Done:** #1, #5, #6, #37 (all verified on hardware). #2, #3, #4 have fixes
-applied and unit coverage but are 🧪 — dial-blocked, see below.
+**Done:** #1, #5, #6, #37 (all verified on hardware). #2, #3, #4, #7 have fixes
+applied and unit coverage but are 🧪. #2/#3/#4 are dial-blocked, see below; #7
+needs a body that is actually noisy on the event stream.
 
 **Blocked on physical access to the camera's mode dial** (needs M + BULB, and
 Long Exposure NR on): verifying #2, #3, and #38. Nothing else depends on this,
@@ -779,14 +862,13 @@ so it is not on the critical path — do the items below while it waits.
 
 1. **#38** — refuse `bulb` when the body is not in BULB (the discovery command is
    in that item; it needs the dial too, but only to *read* one value)
-2. **#7** — bound `_drain_events`
-3. **#8** — bounded lock acquisition + `WatchdogSec` (turns hangs into restarts)
-4. **#13, #14** — quirk layering and vendor contract, **before** adding Canon/Nikon
-5. **#17** — verify `changeafarea` / `bulb` / AF idle value on the rig
+2. **#8** — bounded lock acquisition + `WatchdogSec` (turns hangs into restarts)
+3. **#13, #14** — quirk layering and vendor contract, **before** adding Canon/Nikon
+4. **#17** — verify `changeafarea` / `bulb` / AF idle value on the rig
    (batch this with the #2/#3/#38 dial session — same setup, one trip)
-6. **#9** — compare-and-swap in `_drop_camera`
-7. **#10** — single shared liveview producer (largest change; what makes multi-client work)
-8. Everything else, opportunistically
+5. **#9** — compare-and-swap in `_drop_camera`
+6. **#10** — single shared liveview producer (largest change; what makes multi-client work)
+7. Everything else, opportunistically
 
 #13 and #34 each have an `@expectedFailure` acceptance test already written in
 `tests/test_known_gaps.py` — start there. #5's and #6's have been promoted into
