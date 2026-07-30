@@ -1,10 +1,15 @@
 # Pathfinder — Outstanding Issues
 
-Findings from a full-codebase review (2026-07-25). Ordered by suggested fix order:
-physical-hardware risk first, then correctness, then structure, then hardening.
+Findings from a full-codebase review (2026-07-25), plus a second pass on
+2026-07-30 after the watchdog work landed (#39-#46, in "Later findings" at the
+end). Ordered by suggested fix order: physical-hardware risk first, then
+correctness, then structure, then hardening.
 
 Each item states **what** is wrong, **why** it matters, and a suggested fix.
-Line numbers refer to the state of the tree at commit `da23621`.
+Line numbers in #1-#38 refer to the state of the tree at commit `da23621` and
+are now several commits stale — `BulbExposure` has moved from `app.py:28` to
+`:50`, the `StaticFiles` mount from `:284` to `:392`. #39 onward are anchored to
+`d841aa4`.
 
 **Legend:** 🔴 critical · 🟠 high · 🟡 medium · ⚪ low / nit
 · ✅ fixed & verified · 🧪 fix applied, awaiting hardware verification
@@ -842,11 +847,11 @@ These are the places it's weaker than it looks.
 
 ### 37. ✅ FIXED — No tests
 
-- **Status:** Fixed 2026-07-25. `tests/` — **251 tests** (228 at the time of the
-  fix), stdlib `unittest`, no third-party test dependencies. A fake `gphoto2`
-  binding (`tests/fakes/`) is installed into `sys.modules` before `camera` is
-  imported, so the whole camera layer runs with no libgphoto2 and no camera
-  attached (166 of 251 execute on the dev host, which has no pip). Covers
+- **Status:** Fixed 2026-07-25. `tests/` — **295 tests** (228 at the time of the
+  fix, 251 after #7), stdlib `unittest`, no third-party test dependencies. A fake
+  `gphoto2` binding (`tests/fakes/`) is installed into `sys.modules` before
+  `camera` is imported, so the whole camera layer runs with no libgphoto2 and no
+  camera attached (181 of 295 execute on the dev host, which has no pip). Covers
   exactly what this item asked for: quirk resolution, `_coerce`, the
   error→HTTP-status mapping, and the disconnect/reconnect state machine. See
   `tests/tests.md`.
@@ -892,26 +897,220 @@ These are the places it's weaker than it looks.
 
 ---
 
+## Later findings (second review pass, 2026-07-30)
+
+Found after the watchdog work in `d841aa4`. Numbered in discovery order rather
+than slotted into the tiers above, so existing references stay valid — severity
+is in the emoji, and the fix order is in "Suggested order" below. #39-#41 are all
+consequences of the #8 fix that the docs written alongside it didn't account for.
+
+### 39. 🟠 A wedged USB handshake at boot becomes a silent restart loop
+
+- **Where:** `app.py:158` (`_try_connect` in `lifespan`), `app.py:160-166`
+  (watchdog task creation), `setup.sh:154` (`Type=simple`), `setup.sh:161-163`
+- **Issue:** `lifespan` calls `_try_connect(app)` **synchronously, before** the
+  watchdog task exists. With `Type=simple` systemd starts the `WatchdogSec=30`
+  timer at `exec`, not at `READY=1`, so the deadline is already running during
+  that blocking `cam.init()`. A body that wedges the handshake at boot is
+  SIGABRT'd before the first `WATCHDOG=1` is ever sent, `Restart=always` /
+  `RestartSec=3` brings it back, and it wedges again.
+- **Why it matters:** The loop has no terminal state. Cycles are ~33s apart, so
+  systemd's default `StartLimitBurst=5` / `StartLimitIntervalSec=10s` never
+  trips — the unit never reaches `failed`, so nothing escalates and nothing
+  alerts. The device just cycles, and the journal shows a restart with no error.
+  This is the watchdog firing on the one startup path it cannot protect: the
+  window before it is armed. #30 notes the blocking startup and #8 the watchdog;
+  the interaction is new as of `d841aa4`.
+- **Fix:** Arm the watchdog **first**, then connect off the loop:
+  ```python
+  tasks = [asyncio.create_task(_camera_watcher(app))]
+  interval = _watchdog_interval()
+  if interval is not None:
+      _sd_notify("READY=1")
+      tasks.append(asyncio.create_task(_watchdog(interval)))
+  await run_in_threadpool(_try_connect, app)   # after, not before
+  ```
+  Consider an explicit `StartLimitIntervalSec=0` or a longer `RestartSec` in the
+  unit so a genuinely dead device backs off instead of spinning.
+- **See also:** #30 (the blocking call itself), #8 (the watchdog).
+
+### 40. 🟡 `_watchdog` is an unguarded task, and it fails *closed*
+
+- **Where:** `app.py:134-152`
+- **Issue:** Same shape as #32 (`_camera_watcher` dying silently), but the
+  consequences are inverted. If the loop body raises — `probe.exception()`
+  returning something the code doesn't expect, anything non-`OSError` escaping
+  `_sd_notify` — the task dies, the pings stop, and systemd aborts the process.
+- **Why it matters:** #32 costs you the reconnect feature. This costs you a
+  **healthy** process, killed every 30s forever, with the watchdog reporting the
+  outage it is itself causing. A watchdog that fails closed on its own bug is
+  worse than no watchdog: the standard rule for a kick-from-the-main-loop design
+  is that the kicker must be the most boring code in the process.
+- **Fix:** `try/except Exception: log.exception(...)` around the loop body so a
+  bug in the heartbeat can't be mistaken for a hang. Fix alongside #32 — same
+  pattern, both tasks.
+
+### 41. 🟡 Shutdown during a bulb silently skips the cleanup it exists to perform
+
+- **Where:** `app.py:174-183` (`lifespan` teardown)
+- **Issue:** Both `set_recording(False)` and `camera.disconnect()` now go through
+  `_bus(...)` with the 2s `BUS_TIMEOUT`, and both are wrapped in a bare
+  `except Exception: pass`. While a bulb holds the bus (up to
+  `MAX_BULB_SECONDS`), each times out with `CameraBusy` and is swallowed with no
+  log line: recording is not stopped and the USB claim is not released. uvicorn
+  then blocks on the worker thread anyway, so the process lingers regardless.
+- **Why it matters:** `tests/tests.md` states the guarantee "Shutdown stops
+  recording before it disconnects, so a service restart can't leave the body
+  filling the card." That is now conditional on the bus being free, and the test
+  passes because it never holds the bus during shutdown. A guarantee that quietly
+  became conditional is worse than one that was never claimed. #8's residual-risk
+  note covers the claim leaking in general; it does not cover the shutdown path.
+- **Fix:** Log at `WARNING` instead of `pass` (a swallowed shutdown failure on a
+  headless device is invisible), and give the shutdown path a longer bus deadline
+  than 2s so it waits out a short exposure rather than giving up instantly. Add a
+  test that holds the bus across shutdown, so the stated guarantee is pinned to
+  the condition it actually holds under.
+
+### 42. 🟡 `requirements.txt` installs `gphoto2` twice, contradictorily
+
+- **Where:** `requirements.txt:4`, `setup.sh:124` (step 6/9), `setup.sh:127-130`
+  (step 7/9)
+- **Issue:** Step 6 installs `gphoto2` from `requirements.txt` as a PyPI wheel —
+  which **bundles its own libgphoto2** — and step 7 immediately force-reinstalls
+  it from source against `/usr/local`. The first install is pure waste on a Pi,
+  and the two disagree about which library the binding links.
+- **Why it matters:** The failure mode is exactly what steps 2-4 exist to
+  prevent. If step 7 is ever skipped, interrupted, or reordered, the tree still
+  has a working-looking `import gphoto2` — linked against the bundled library
+  with the Sony regression `setup.sh` builds from source to avoid. Two install
+  paths for one dependency means the "which libgphoto2 am I actually running"
+  question has no single answer, which compounds #25 (unpinned build).
+- **Fix:** Drop `gphoto2` from `requirements.txt` (leaving one install path,
+  step 7) and note in the file why it is deliberately absent. Optionally have
+  step 7 assert the built extension resolves to `/usr/local` afterwards.
+
+### 43. ⚪ `captures/` is not gitignored
+
+- **Where:** `.gitignore`, `camera/gp2.py:14` (`CAPTURE_DIR`), `setup.sh:158`
+  (`WorkingDirectory`)
+- **Issue:** `CAPTURE_DIR` defaults to `"captures"`, CWD-relative, and the unit
+  sets `WorkingDirectory=$PROJECT_DIR` — so every shot lands as an untracked file
+  **inside the git working tree**, and inside whatever the `.vscode/sftp.json`
+  sync covers. `.gitignore` covers `logs/` but not this.
+- **Why it matters:** RAWs in the working tree make `git status` useless on the
+  device, invite an accidental `git add -A` committing photos, and put the
+  capture directory in the path of an editor sync that has no reason to see it.
+- **Fix:** Add `captures/` to `.gitignore`. Better, resolve `CAPTURE_DIR` to a
+  path outside the repo by default (`~/pathfinder-captures`, or a
+  `ReadWritePaths=` directory once #24 lands) — see #31 for the CWD-relativity
+  half of this.
+
+### 44. ⚪ `POST /api/settings/{name}` re-reads outside its own error mapping
+
+- **Where:** `app.py:389`
+- **Issue:** The trailing `return await _run_camera(cam.list_settings)` sits
+  **outside** the handler's `try`. A gphoto2 failure on the read-back is an
+  unhandled 500 + traceback, while the identical failure on the write two lines
+  above is a clean 400.
+- **Why it matters:** The browser re-renders the whole panel from this response,
+  so the read-back is not incidental — it is half the endpoint's contract. Same
+  family as #33, different line than the ones that item names.
+- **Fix:** Fold it into the `try`, or into whatever shared error-mapping helper
+  #33 produces.
+
+### 45. ⚪ README tells you to clone over SSH on a machine with no key
+
+- **Where:** `README.md` (Provisioning), `git@github.com:nathanroorda/pathfinder.git`
+- **Issue:** A freshly imaged Pi has no SSH key and no GitHub association, so the
+  very first provisioning command fails unless the operator has already set up a
+  deploy key by hand.
+- **Fix:** Use the HTTPS clone URL in the README. *(Fixed 2026-07-30 as part of
+  the README drift pass.)*
+
+### 46. ✅ FIXED — Documentation drift outside the README
+
+- **Status:** All four corrected 2026-07-30, in the same pass as the README.
+  No code changed — these were documentation-only inaccuracies. `log.md` now
+  states stderr and spells out the `2>&1` consequence for running outside
+  systemd; `web.md` carries the `!bulbing` term and now lists all three
+  `updateLiveview()` call sites, distinguishing *why* the stream is off during a
+  recording (backend refuses) from during a bulb (backend accepts but the lock is
+  held); `camera.md` attributes the settings/telemetry split to
+  `INCLUDE_SECTIONS` rather than the read-only filter; `requirements.txt` points
+  at the right filename.
+- **Where:** `log.md:8,19-20,45`; `web/web.md:89`; `camera/camera.md:337`;
+  `requirements.txt:4`
+- **Issue:** Four independent inaccuracies, none behavioural:
+  - **`log.md` says stdout three times.** `logging.basicConfig()` with no
+    `stream=` uses **stderr** (verified). No impact under journald, which
+    captures both — but the claim is wrong, and it matters the moment anyone
+    pipes the app or redirects one stream.
+  - **`web.md:89`** gives the liveview on-state as `connected && !recording`;
+    `script.js:45` and web.md's own line 163 say
+    `connected && !recording && !bulbing`. Stale since the bulb feature landed.
+  - **`camera.md:337`** attributes the telemetry/settings non-overlap to
+    `list_settings`'s not-read-only filter. It is actually the section split —
+    `status` is not in `INCLUDE_SECTIONS`, so status widgets never reach that
+    filter at all. The real guarantee is *stronger* than the documented one; a
+    writable widget in `status` would break the documented mechanism but not the
+    actual one.
+  - **`requirements.txt:4`** comment points at `camera/gphoto2.py`; the file is
+    `camera/gp2.py`.
+- **Why it matters:** These docs are precise enough that they get trusted over
+  the source. A doc that is right 95% of the time is read as authoritative, so
+  the wrong 5% is more dangerous than a vague doc would be.
+- **Note:** `TODO.md`'s own stale test counts (#37 said 251/166) were corrected
+  in the same pass; the count is now 295/181, matching `tests/tests.md` and a
+  live run.
+- **Residual:** nothing enforces this. All four drifted because no test can see
+  a prose claim, and three of them (`web.md`, `camera.md`, `#37`'s counts) went
+  stale because a *code* change had no corresponding doc edit. The cheap partial
+  fix is to extend the `test_web_contract.py` trick — parse the doc, assert
+  against the source — for the handful of claims that are mechanically
+  checkable: the `updateLiveview()` predicate, the test count in `tests.md`, the
+  route table in `app.md`. Filed as a candidate, not a commitment; most of what
+  these docs say is reasoning, which no test can pin.
+
+### 47. ⚪ Nits
+
+- `camera/sony.py:8` — two dict entries jammed onto one line
+  (`"focus_mode_widget": "focusmode","af_modes": …`).
+- `camera/gp2.py:96-106` — `_bus` reads `self._busy_with` without the lock when
+  building the `CameraBusy` message, and `close()` reads it again after the
+  raise. Benign, but the refusal can name `None` or a stale operation, which
+  undercuts the "the refusal names the holder is most of the diagnosis" claim in
+  `camera.md`.
+
+---
+
 ## Suggested order
 
-**Done:** #1, #5, #6, #37 (all verified on hardware). #2, #3, #4, #7, #8 have
-fixes applied and unit coverage but are 🧪. #2/#3/#4 are dial-blocked, see below;
-#7 needs a body that is actually noisy on the event stream; #8 needs a
-`systemctl`/`kill -STOP` session on the Pi (it also needs `setup.sh` re-run, or
-the unit edited by hand, to pick up `WatchdogSec`).
+**Done:** #1, #5, #6, #37, #45, #46 (all verified on hardware except #45/#46,
+which are documentation-only).
+#2, #3, #4, #7, #8 have fixes applied and unit coverage but are 🧪. #2/#3/#4 are
+dial-blocked, see below; #7 needs a body that is actually noisy on the event
+stream; #8 needs a `systemctl`/`kill -STOP` session on the Pi (it also needs
+`setup.sh` re-run, or the unit edited by hand, to pick up `WatchdogSec`).
 
 **Blocked on physical access to the camera's mode dial** (needs M + BULB, and
 Long Exposure NR on): verifying #2, #3, and #38. Nothing else depends on this,
 so it is not on the critical path — do the items below while it waits.
 
-1. **#38** — refuse `bulb` when the body is not in BULB (the discovery command is
+1. **#39, #40** — do these *with* the #8 hardware verification session, not
+   after it. Both are defects in the watchdog itself, and #39 is the one failure
+   mode the `kill -STOP` test cannot reveal (it is armed by then). Cheap: an
+   ordering change and a `try/except`.
+2. **#38** — refuse `bulb` when the body is not in BULB (the discovery command is
    in that item; it needs the dial too, but only to *read* one value)
-2. **#13, #14** — quirk layering and vendor contract, **before** adding Canon/Nikon
-3. **#17** — verify `changeafarea` / `bulb` / AF idle value on the rig
+3. **#13, #14** — quirk layering and vendor contract, **before** adding Canon/Nikon
+4. **#17** — verify `changeafarea` / `bulb` / AF idle value on the rig
    (batch this with the #2/#3/#38 dial session — same setup, one trip)
-4. **#9** — compare-and-swap in `_drop_camera`
-5. **#10** — single shared liveview producer (largest change; what makes multi-client work)
-6. Everything else, opportunistically
+5. **#9** — compare-and-swap in `_drop_camera`
+6. **#41** — batch with #30 and #32; all three are the same lifespan/task-hygiene
+   pass, and #40 is the fourth
+7. **#10** — single shared liveview producer (largest change; what makes multi-client work)
+8. Everything else, opportunistically. #42-#44 and #47 are all small and
+   independent — good filler while hardware access is blocked.
 
 #13 and #34 each have an `@expectedFailure` acceptance test already written in
 `tests/test_known_gaps.py` — start there. #5's and #6's have been promoted into

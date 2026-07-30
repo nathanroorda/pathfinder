@@ -25,7 +25,8 @@ For a Pathfinder device that's already been provisioned:
 3. Open `http://10.42.0.1:8080` in a browser.
 4. Plug the camera into the Pi's USB port and power it on. If the camera has a "PC Remote" / tether mode, enable it.
 5. The status line should read **Connected: \<camera model\>** within a few seconds, and a live preview appears.
-6. Use **AF** / the **◀ ▶** focus nudges to focus, adjust settings, and tap **Capture** for a still or **Record** to start/stop video.
+6. Use **AF** / the **◀ ▶** focus nudges to focus — or tap the live preview to move the AF point to that spot — adjust settings, and tap **Capture** for a still or **Record** to start/stop video.
+7. For a long exposure, put the body in **Bulb** mode, enter a duration next to **Bulb**, and tap it. The preview pauses for the exposure and returns on its own afterwards.
 
 ## File Layout
 
@@ -35,22 +36,33 @@ For a Pathfinder device that's already been provisioned:
 ```
 .
 ├── app.py            FastAPI app: HTTP routes + serves the web UI
+├── app.md            Backend architecture: lifecycle, timeouts, the HTTP API table
 ├── run.py            Entry point — starts the server (python run.py)
+├── log.py            Logging setup (called first, before anything is imported)
+├── log.md            Logging architecture: levels, journald, persistence caveats
 ├── requirements.txt  Python dependencies
 ├── setup.sh          Provisions a fresh Raspberry Pi (see "Provisioning" below)
+├── TODO.md           Known issues and open work, by severity
 ├── camera/
 │   ├── __init__.py  Public interface: connect() / disconnect()
 │   ├── gp2.py       libgphoto2 backend: capture, liveview, recording, focus, settings
-│   └── sony.py      Per-model quirks (timing, retry, focus widgets & modes)
+│   ├── sony.py      Per-model quirks (timing, retry, focus widgets & modes)
+│   └── camera.md    Camera-layer internals: the bus lock, quirks, disconnect handling
 ├── web/
 │   ├── index.html  Page shell
 │   ├── script.js   Status polling, capture button, settings rendering
-│   └── style.css   Styling
+│   ├── style.css   Styling
+│   └── web.md      Frontend behavior and the widget-descriptor contract it renders
 └── tests/
     ├── tests.md    How the suite works and what it deliberately misses
     ├── fakes/      A fake libgphoto2 — the suite needs no camera
     └── test_*.py   unittest modules
 ```
+
+Each `.md` sits next to the code it documents. Start with **`app.md`** for the
+backend, **`camera/camera.md`** for anything touching the camera, and
+**`TODO.md`** before changing behavior — it records why several things are the
+way they are.
 
 </details>
 
@@ -58,7 +70,7 @@ For a Pathfinder device that's already been provisioned:
 
 ## Architecture
 
-- **`app.py` / `run.py`** — a FastAPI app exposing a small REST API (`/api/status`, `/api/connect`, `/api/capture`, `/api/liveview`, `/api/record/*`, `/api/autofocus`, `/api/focus`, `/api/telemetry`, `/api/settings`) and serving `web/` as static files. Runs under `uvicorn`.
+- **`app.py` / `run.py`** — a FastAPI app exposing a small REST API (`/api/status`, `/api/connect`, `/api/capture`, `/api/bulb`, `/api/liveview`, `/api/record/*`, `/api/autofocus`, `/api/focus`, `/api/afpoint`, `/api/telemetry`, `/api/settings`) and serving `web/` as static files. Runs under `uvicorn`. Every route is documented with its error cases in **`app.md`**.
 - **`camera/`** — wraps the `gphoto2` Python binding. `gp2.py` handles connecting, capturing, live preview, recording, focus, and reading/writing settings; `sony.py` holds per-model quirks (timing, retry, focus widgets & modes) looked up by camera model string.
 - **`web/`** — a small vanilla JS/HTML/CSS frontend. It shows a live preview and focus controls, renders whatever settings the connected camera reports (choice/toggle/range/text controls, built dynamically from the API response), and posts changes back.
 - **`tests/`** — a `unittest` suite that runs against a fake libgphoto2, so no camera (and no `gphoto2` install) is needed. See **`tests/tests.md`**.
@@ -80,25 +92,31 @@ No third-party test dependencies. On a machine without `fastapi`/`pydantic` the 
 
 ```
 ssh <user>@<pi-on-your-network>
-git clone git@github.com:nathanroorda/pathfinder.git
+git clone https://github.com/nathanroorda/pathfinder.git
 cd pathfinder
 ./setup.sh
 ```
 
-What it does (re-runnable — each step is safe to run again):
+(HTTPS, not SSH — a freshly imaged Pi has no key on it yet.)
+
+What it does — nine steps, re-runnable (each is safe to run again):
 
 1. Installs system + build packages.
 2. Builds `libgphoto2` from source (the packaged version has a known Sony regression).
-3. Removes the old apt-packaged `libgphoto2` so the source build isn't shadowed.
-4. Generates udev rules + a hwdb entry covering every camera libgphoto2 supports, and grants USB access via the `plugdev` group — no per-camera configuration needed.
-5. Creates a Python venv and installs dependencies.
-6. Builds the `gphoto2` Python binding against the source-built library.
-7. Creates the **Pathfinder** WiFi access point (NetworkManager hotspot at `10.42.0.1`).
-8. Installs and enables the `pathfinder` systemd service (starts `run.py` on boot).
+3. Builds the `gphoto2` **CLI** from source too, against that library — not needed by the app, but it's the tool you'll debug a new body with (`gphoto2 --list-all-config`).
+4. Removes the old apt-packaged `libgphoto2` so the source build isn't shadowed.
+5. Generates udev rules + a hwdb entry covering every camera libgphoto2 supports, and grants USB access via the `plugdev` group — no per-camera configuration needed.
+6. Creates a Python venv and installs dependencies.
+7. Rebuilds the `gphoto2` Python binding from source against the source-built library.
+8. Creates the **Pathfinder** WiFi access point (NetworkManager hotspot at `10.42.0.1`).
+9. Installs and enables the `pathfinder` systemd service (starts `run.py` on boot, under a 30s systemd watchdog — see below).
 
-Env toggles:
+It finishes by connecting to the camera and taking one test frame, so expect the shutter to fire once.
+
+Provisioning env toggles:
 - `FORCE_BUILD=1` — rebuild libgphoto2 even if already installed.
 - `AP_ON_BOOT=0` — create the AP profile but don't auto-start it on boot (keeps a home-WiFi fallback for development).
+- `PATHFINDER_NO_TMUX=1` — don't wrap the run in tmux (it does by default, so a dropped SSH session doesn't kill a half-finished build).
 
 After it finishes, reboot — the AP and app both come up automatically.
 
@@ -108,11 +126,34 @@ sudo systemctl {start,stop,status,restart} pathfinder
 journalctl -u pathfinder -f
 ```
 
+### Runtime configuration
+
+Read from the environment at process start, so changing one needs a service
+restart. Set them via a systemd drop-in (`setup.sh` regenerates the unit file on
+every run, so an in-place edit gets overwritten) — `log.md` has the recipe.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `PATHFINDER_LOG_LEVEL` | `DEBUG` | Root log level. `DEBUG` is verbose enough to matter for SD-card wear on a long deployment. |
+| `PATHFINDER_CAPTURE_DIR` | `captures` | Where downloaded frames land. Relative paths resolve against the service's `WorkingDirectory`, i.e. the repo. |
+| `PATHFINDER_MAX_BULB_SECONDS` | `900` | Ceiling on a single bulb exposure. The server rejects anything above it with a 422 before touching hardware — this bounds how long a bad request can hold the shutter open. Note the UI's input still caps at the compiled-in default of 900, so raising this only takes effect for direct API calls unless you also edit `web/index.html`. |
+
+### The watchdog
+
+The systemd unit sets `WatchdogSec=30` and `Restart=always`. The app pings
+systemd every 15s, but **only** after a round trip through the same thread pool
+the camera operations use — so a wedged `libgphoto2` call (which cannot be
+interrupted from Python) withholds the ping and systemd restarts the process
+within ~45s. This is why the service may restart itself with no error in the
+log; see the Troubleshooting note below, and `app.md` for the reasoning.
+
 ## Troubleshooting
 
 - **Camera not detected** — confirm it's powered on, in "PC Remote" / tether mode if it has one, and connected to the Pi's data/USB port (not a charge-only port). Re-run `sudo udevadm trigger` or unplug/replug.
 - **Can't reach `10.42.0.1`** — make sure your phone actually joined the **Pathfinder** network, not your home WiFi (the Pi only has one radio, so it can't host both at once).
 - **App not responding after boot** — check `journalctl -u pathfinder -f` for errors, and confirm the service is active with `systemctl status pathfinder`.
+- **The service keeps restarting, with nothing in the log** — that's the watchdog. Look for `Watchdog timeout` in `journalctl -u pathfinder`, and for the `threadpool has not answered a liveness probe` line just before it, which means a camera operation wedged. Unplug the camera and see whether the service settles; if it does, the body wedged the USB transaction rather than the app crashing. (A restart loop with *no* watchdog message and no `camera connected` line is a wedged connect at startup — `TODO.md` #39.)
+- **`Connected: <model>` but every button returns an error and the settings panel is empty** — the camera is in MTP/Mass Storage mode, not PC Remote. The connection succeeds; there just aren't any controls behind it.
 
 ## Notes
 

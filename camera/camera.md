@@ -333,8 +333,12 @@ Pathfinder reflects whatever the connected body exposes:
 - **`telemetry()`** is the read-only counterpart: it walks the same config tree
   but keeps leaf widgets under `STATUS_SECTIONS` = `{status}` — the battery,
   frames-remaining, model, serial, and lens fields the body reports but you don't
-  edit. These are deliberately *excluded* from `list_settings()` by its
-  not-read-only filter, so the two surfaces don't overlap. Each is reduced to a
+  edit. The two surfaces cannot overlap, and the reason is the **section split**,
+  not the read-only filter: `status` is not in `INCLUDE_SECTIONS`, so a status
+  widget never reaches `_settable_widgets`' filters at all. Worth being precise
+  about, because the guarantee is stronger than "they happen to be read-only" —
+  a body that advertised a *writable* widget in its `status` section would still
+  be kept out of the settings panel. Each is reduced to a
   bare `{name, label, value}` by `_describe_status` (no `type`/`choices`/`range`,
   since nothing renders them as editable controls). Reading an individual status
   widget's value can fail on some bodies — a prop the driver advertises but can't

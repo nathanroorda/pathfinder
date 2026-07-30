@@ -86,15 +86,19 @@ that the browser decodes frame by frame, swapping the `<img>` in place. Clearing
 `src` tears the connection down (which also signals the server generator to stop,
 via `request.is_disconnected()`).
 
-`updateLiveview()` reconciles the stream toward a desired on-state of **`connected
-&& !recording`** and is idempotent — it only opens a stream when one isn't already
-running and only tears down when one is, so it's safe to call on every 5s status
-poll without restarting a healthy feed. It's invoked from `setRecording()` (so
-starting/stopping a recording toggles the preview) and from `refreshStatus()`'s
-error path (server unreachable → stop). The stream is deliberately **off while
-recording**: the backend refuses `preview()` mid-recording to avoid extra PTP
-traffic on the bus while the movie is rolling (see **`camera.md`**), so the client
-doesn't request frames it would only get errors for. A stream error (camera
+`updateLiveview()` reconciles the stream toward a desired on-state of
+**`connected && !recording && !bulbing`** and is idempotent — it only opens a
+stream when one isn't already running and only tears down when one is, so it's
+safe to call on every 5s status poll without restarting a healthy feed. It's
+invoked from `setRecording()` (so starting/stopping a recording toggles the
+preview), from both ends of the bulb handler (see "Bulb and tap-to-focus"), and
+from `refreshStatus()`'s error path (server unreachable → stop). The stream is
+deliberately **off while recording**: the backend refuses `preview()`
+mid-recording to avoid extra PTP traffic on the bus while the movie is rolling
+(see **`camera.md`**), so the client doesn't request frames it would only get
+errors for. It is off during a bulb for a related but distinct reason — there the
+backend would *accept* the request, but the exposure holds the camera lock for
+its full duration, so every frame would just be a 409 (see **`app.md`**). A stream error (camera
 hiccup, or the server generator ending when the camera drops) fires the `<img>`
 `error` handler, which clears `src`; the next status poll re-opens it if the
 camera is still connected — the same self-healing pattern the settings panel and

@@ -5,7 +5,8 @@
 - **`log.py`** — one function, `configure_logging()`, called once at the top
   of `run.py` before anything else is imported. It calls
   `logging.basicConfig()`, which sets up the **root logger**: a single
-  `StreamHandler` writing to stdout, formatted as
+  `StreamHandler` writing to **stderr** — `basicConfig()`'s default when no
+  `stream=` is passed — formatted as
   `%(asctime)s %(levelname)-8s %(name)s: %(message)s`.
 - **Per-module loggers** — `app.py` and `camera/gp2.py` each get their own
   logger via `logging.getLogger(__name__)` and log through it
@@ -16,8 +17,12 @@
   uvicorn's request/access logs also flow through the same root logger
   instead of uvicorn setting up a separate, conflicting handler.
 
-There is no file handler anywhere in the app. All log output goes to stdout
-only.
+There is no file handler anywhere in the app. All log output goes to stderr
+only — including `INFO`/`DEBUG` records, which is standard for `logging` but
+surprises people expecting the usual stdout/stderr split by severity. It makes
+no difference under systemd, which captures both streams into the journal
+identically, but it matters the moment you run the app by hand: `python run.py >
+out.txt` captures nothing, and `2>&1` is required to redirect the logs.
 
 ## Level control
 
@@ -32,7 +37,7 @@ Read in `log.py`, converted to a `logging` level constant, and passed to
 that isn't a real level name (e.g. a typo) falls back to `INFO`. Because it's read
 once at startup, changing it requires a process restart — there's no live reload.
 
-## How stdout becomes durable: systemd + journald
+## How the log stream becomes durable: systemd + journald
 
 Pathfinder runs as the `pathfinder` systemd service (installed by
 `setup.sh`). systemd captures a managed service's stdout/stderr by default
@@ -42,7 +47,7 @@ log file or the journal directly; it's purely systemd's process supervision
 picking up the stream.
 
 ```
-app (stdout) → systemd (captures service stdout/stderr) → journald → journalctl
+app (stderr) → systemd (captures service stdout/stderr) → journald → journalctl
 ```
 
 ## Persistence caveat
