@@ -158,8 +158,10 @@ SupplementaryGroups=plugdev
 WorkingDirectory=$PROJECT_DIR
 Environment=LD_LIBRARY_PATH=/usr/local/lib
 ExecStart=$PROJECT_DIR/.venv/bin/python $PROJECT_DIR/run.py
-Restart=on-failure
+Restart=always
 RestartSec=3
+WatchdogSec=30
+NotifyAccess=main
  
 [Install]
 WantedBy=multi-user.target

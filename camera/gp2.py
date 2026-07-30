@@ -18,6 +18,8 @@ RELEASE_RETRY_DELAY = 0.2
 BULB_READOUT_MARGIN = 15.0
 DRAIN_TIMEOUT = 1.0
 DRAIN_POLL_MS = 200
+BUS_TIMEOUT = 2.0
+PREVIEW_BUS_TIMEOUT = 0.25
 
 DEFAULT_QUIRKS = {
     "shot_gap": 0.0,
@@ -66,6 +68,10 @@ class CameraDisconnected(Exception):
     """An operation was attempted on a connection that has been closed."""
 
 
+class CameraBusy(RuntimeError):
+    """The bus was held by another operation; nothing was sent to the body."""
+
+
 def is_disconnect_error(exception):
     if isinstance(exception, CameraDisconnected):
         return True
@@ -76,6 +82,7 @@ class Gphoto2Camera:
     def __init__(self, cam, model):
         self._cam = cam
         self._lock = threading.Lock()
+        self._busy_with = None
         self._last_shot = 0.0
         self.model = model
         self._quirks = _quirks_for(model)
@@ -85,15 +92,34 @@ class Gphoto2Camera:
         if self._cam is None:
             raise CameraDisconnected("camera connection is closed")
 
+    @contextlib.contextmanager
+    def _bus(self, operation, timeout=None):
+        timeout = BUS_TIMEOUT if timeout is None else timeout
+        if not self._lock.acquire(timeout=timeout):
+            raise CameraBusy(
+                f"camera is busy with {self._busy_with or 'another operation'}")
+        self._busy_with = operation
+        try:
+            yield
+        finally:
+            self._busy_with = None
+            self._lock.release()
+
     def close(self):
-        with self._lock:
-            if self._cam is None:
-                return
-            cam, self._cam = self._cam, None
-            cam.exit()
+        try:
+            with self._bus("close"):
+                if self._cam is None:
+                    return
+                cam, self._cam = self._cam, None
+                cam.exit()
+        except CameraBusy:
+            log.error("cannot close the connection: the bus is still held by %s — "
+                      "the USB claim stays open until that operation finishes",
+                      self._busy_with or "another operation")
+            raise
 
     def capture(self, save_dir=CAPTURE_DIR):
-        with self._lock:
+        with self._bus("capture"):
             self._require_open()
             if self.recording:
                 raise RuntimeError("cannot capture a still while recording")
@@ -107,7 +133,7 @@ class Gphoto2Camera:
             return target
 
     def bulb(self, seconds, save_dir=CAPTURE_DIR):
-        with self._lock:
+        with self._bus("bulb"):
             self._require_open()
             if self.recording:
                 raise RuntimeError("cannot capture a still while recording")
@@ -149,7 +175,7 @@ class Gphoto2Camera:
             f"bulb exposure produced no image within {timeout:.0f}s")
 
     def preview(self):
-        with self._lock:
+        with self._bus("preview", timeout=PREVIEW_BUS_TIMEOUT):
             self._require_open()
             if self.recording:
                 raise RuntimeError("cannot preview while recording")
@@ -183,7 +209,7 @@ class Gphoto2Camera:
 
     def set_recording(self, on):
         on = bool(on)
-        with self._lock:
+        with self._bus("set_recording"):
             self._require_open()
             if on == self.recording:
                 return self.recording
@@ -195,7 +221,7 @@ class Gphoto2Camera:
             return self.recording
 
     def autofocus(self):
-        with self._lock:
+        with self._bus("autofocus"):
             self._require_open()
             mode = self._ensure_focus_mode(
                 self._quirks["af_modes"], self._quirks["af_target_mode"])
@@ -212,7 +238,7 @@ class Gphoto2Camera:
             return mode
 
     def manual_focus(self, steps):
-        with self._lock:
+        with self._bus("manual_focus"):
             self._require_open()
             mode = self._ensure_focus_mode(
                 self._quirks["mf_modes"], self._quirks["mf_target_mode"])
@@ -220,7 +246,7 @@ class Gphoto2Camera:
             return mode
 
     def set_af_point(self, x, y):
-        with self._lock:
+        with self._bus("set_af_point"):
             self._require_open()
             widget = self._quirks["af_area_widget"]
             if not widget:
@@ -247,8 +273,6 @@ class Gphoto2Camera:
         self._cam.set_single_config(widget_name, widget)
 
     def _release_action(self, widget_name, value):
-        # The edge that leaves hardware latched if it never lands — an open
-        # shutter, a hunting lens — so one failed write is not the end of it.
         for attempt in range(RELEASE_ATTEMPTS):
             try:
                 return self._drive_action(widget_name, value)
@@ -263,12 +287,12 @@ class Gphoto2Camera:
         raise failure
 
     def list_settings(self):
-        with self._lock:
+        with self._bus("list_settings"):
             self._require_open()
             return [_describe(w) for w in _settable_widgets(self._cam.get_config())]
 
     def set_setting(self, name, value):
-        with self._lock:
+        with self._bus("set_setting"):
             self._require_open()
             cfg = self._cam.get_config()
             widget = _settable_widget(cfg, name)
@@ -276,7 +300,7 @@ class Gphoto2Camera:
             self._cam.set_config(cfg)
 
     def telemetry(self):
-        with self._lock:
+        with self._bus("telemetry"):
             self._require_open()
             widgets = []
             config = self._cam.get_config()

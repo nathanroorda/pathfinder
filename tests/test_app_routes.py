@@ -187,6 +187,45 @@ class DisconnectHandling(RouteTestCase):
         self.assertIsNone(self.state.camera)
 
 
+class BusyHandling(RouteTestCase):
+    def test_a_busy_bus_is_a_conflict_and_keeps_the_connection(self):
+        self.cam.errors["capture"] = gp2.CameraBusy("camera is busy with bulb")
+
+        exc = self.assertHTTPStatus(409, app_module.capture)
+
+        self.assertIn("bulb", exc.detail)
+        self.assertIs(self.state.camera, self.cam)
+        self.assertFalse(self.cam.closed)
+
+    def test_every_hardware_route_reports_busy_as_a_conflict(self):
+        cases = [
+            ("capture", app_module.capture, ()),
+            ("bulb", app_module.bulb, (app_module.BulbExposure(seconds=1),)),
+            ("set_recording", app_module.record_start, ()),
+            ("autofocus", app_module.autofocus, ()),
+            ("manual_focus", app_module.manual_focus,
+             (app_module.FocusStep(steps=1),)),
+            ("set_af_point", app_module.af_point,
+             (app_module.AfPoint(x=0.5, y=0.5),)),
+            ("telemetry", app_module.telemetry, ()),
+            ("list_settings", app_module.get_settings, ()),
+        ]
+        for method, route, args in cases:
+            with self.subTest(route=route.__name__):
+                self.setUp()
+                self.cam.errors[method] = gp2.CameraBusy("camera is busy with capture")
+                self.assertHTTPStatus(409, route, *args)
+                self.assertIs(self.state.camera, self.cam)
+
+    def test_a_busy_setting_write_is_not_reported_as_a_bad_value(self):
+        self.cam.errors["set_setting"] = gp2.CameraBusy("camera is busy with capture")
+
+        self.assertHTTPStatus(409, lambda: app_module.set_setting(
+            "iso", app_module.SettingValue(value="800")))
+
+        self.assertEqual(self.cam.called("list_settings"), [])
+
+
 class Bulb(RouteTestCase):
     def body(self, seconds=2.0):
         return app_module.BulbExposure(seconds=seconds)
@@ -307,9 +346,10 @@ class Settings(RouteTestCase):
 class Liveview(RouteTestCase):
     def setUp(self):
         super().setUp()
-        patcher = mock.patch.object(app_module, "LIVEVIEW_FRAME_INTERVAL", 0)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for name in ("LIVEVIEW_FRAME_INTERVAL", "LIVEVIEW_RETRY_INTERVAL"):
+            patcher = mock.patch.object(app_module, name, 0)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     async def _response(self, request):
         return await app_module.liveview(request)
@@ -354,6 +394,15 @@ class Liveview(RouteTestCase):
 
         self.assertEqual(len(chunks), 1)
         self.assertEqual(self.cam.preview.call_count, 2)
+
+    def test_a_busy_bus_pauses_the_stream_rather_than_ending_it(self):
+        self.cam.preview = mock.Mock(side_effect=[
+            gp2.CameraBusy("camera is busy with capture"), b"\xff\xd8jpeg"])
+
+        chunks = run(self._collect(StubRequest(alive_for=10), limit=1))
+
+        self.assertEqual(len(chunks), 1)
+        self.assertIs(self.state.camera, self.cam)
 
 
 class TryConnect(RouteTestCase):
@@ -423,6 +472,76 @@ class ConnectRoute(RouteTestCase):
             exc = self.assertHTTPStatus(503, app_module.connect)
 
         self.assertIn("no camera", exc.detail)
+
+
+class ConnectLock(RouteTestCase):
+    def setUp(self):
+        super().setUp()
+        self.state.camera = None
+        patcher = mock.patch.object(app_module, "CONNECT_TIMEOUT", 0.05)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def _with_the_lock_held(self, body):
+        await app_module._connect_lock.acquire()
+        try:
+            return await body()
+        finally:
+            app_module._connect_lock.release()
+
+    def test_an_attempt_already_in_flight_is_skipped_not_queued(self):
+        attempts = []
+
+        async def scenario():
+            with mock.patch.object(app_module, "_try_connect", attempts.append):
+                return await self._with_the_lock_held(
+                    lambda: app_module._connect_if_needed(app_module.app))
+
+        self.assertFalse(run(scenario()))
+        self.assertEqual(attempts, [])
+
+    def test_the_connect_route_answers_instead_of_hanging_behind_it(self):
+        async def scenario():
+            return await self._with_the_lock_held(app_module.connect)
+
+        with self.assertRaises(HTTPException) as caught:
+            run(scenario())
+
+        self.assertEqual(caught.exception.status_code, 503)
+        self.assertIn("in flight", caught.exception.detail)
+
+    def test_giving_up_on_the_lock_is_warned_about(self):
+        async def scenario():
+            return await self._with_the_lock_held(
+                lambda: app_module._connect_if_needed(app_module.app))
+
+        with self.assertLogs("app", level="WARNING") as captured:
+            run(scenario())
+
+        self.assertIn("in flight", "\n".join(captured.output))
+
+    def test_the_watcher_keeps_polling_instead_of_dying_on_the_lock(self):
+        async def scenario():
+            async def watch():
+                with mock.patch.object(app_module, "CAMERA_POLL_INTERVAL", 0):
+                    task = asyncio.create_task(
+                        app_module._camera_watcher(app_module.app))
+                    await asyncio.sleep(0.2)
+                    alive = not task.done()
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+                    return alive
+
+            return await self._with_the_lock_held(watch)
+
+        self.assertTrue(run(scenario()))
+
+    def test_a_free_lock_still_connects(self):
+        with mock.patch.object(app_module.camera, "connect", return_value=self.cam):
+            self.assertTrue(run(app_module._connect_if_needed(app_module.app)))
+
+        self.assertIs(self.state.camera, self.cam)
 
 
 class Watcher(RouteTestCase):

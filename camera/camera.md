@@ -20,13 +20,13 @@ app.py ──import camera──▶ camera/__init__.py ──▶ gp2.py ──�
 
 ## Files
 
-- **`__init__.py`** — the public surface. Re-exports exactly four names from
+- **`__init__.py`** — the public surface. Re-exports exactly five names from
   `gp2`: `connect`, `disconnect`, `is_disconnect_error`, and the
-  `CameraDisconnected` exception, and pins them in `__all__`. `app.py`'s only
-  import from this package is `import camera`, so this list *is* the contract —
-  anything not re-exported here is a package-internal detail. (`CameraDisconnected`
-  is `CapWords` because it's a class; the rest are `snake_case` functions — the
-  standard Python split, not an inconsistency.)
+  `CameraDisconnected` / `CameraBusy` exceptions, and pins them in `__all__`.
+  `app.py`'s only import from this package is `import camera`, so this list *is*
+  the contract — anything not re-exported here is a package-internal detail.
+  (The exceptions are `CapWords` because they're classes; the rest are
+  `snake_case` functions — the standard Python split, not an inconsistency.)
 - **`gp2.py`** — the libgphoto2 backend. Connection, capture, recording,
   settings read/write, telemetry, and the disconnect-error classification all
   live here.
@@ -48,15 +48,39 @@ them off the event loop (via `run_in_threadpool`).
 The object owns the live `gphoto2` handle (`_cam`) and all state tied to it. Two
 design points drive everything else in the class:
 
-**1. One lock guards every hardware op.** `_lock` (a `threading.Lock`) wraps the
-body of `capture`, `preview`, `set_recording`, `autofocus`, `manual_focus`,
-`list_settings`, `set_setting`, `telemetry`, and `close`.
+**1. One lock guards every hardware op, and waiting on it is bounded.** `_lock`
+(a `threading.Lock`) wraps the body of `capture`, `bulb`, `preview`,
+`set_recording`, `autofocus`, `manual_focus`, `set_af_point`, `list_settings`,
+`set_setting`, `telemetry`, and `close`.
 This matters because `app.py` runs these on threadpool workers — without the
 lock, a capture and a settings write could execute inside libgphoto2
 concurrently, which the binding doesn't tolerate. `_require_open()` (called at the
 top of each locked block) raises `CameraDisconnected` if `close()` has already
 nulled `_cam`; because `close()` takes the *same* lock, once `_require_open()`
 passes, `_cam` is guaranteed valid for the rest of that block.
+
+Every one of those blocks goes through the `_bus(operation)` context manager
+rather than `with self._lock:` directly, and `_bus` **acquires with a deadline** —
+`BUS_TIMEOUT` (2s), or the shorter `PREVIEW_BUS_TIMEOUT` (0.25s) for liveview
+frames — raising `CameraBusy` if it expires. The reason is that everything under
+this lock is a blocking C call into USB that nothing can interrupt: a body that
+wedges mid-PTP-transaction keeps its caller's threadpool worker permanently, and
+an unbounded `with self._lock:` would then consume one more worker per queued
+request until the pool (40) is gone and the process is inert while still very much
+"running" (TODO #8). Bounding the *wait* can't rescue the stuck operation — no
+Python-level timeout can interrupt a C call — but it keeps one wedge from taking
+the server with it. `app.py` maps `CameraBusy` to **409**; it is deliberately
+*not* a disconnect error, so a busy bus never tears down a healthy connection.
+The refusal names the current holder (`camera is busy with bulb`), which on a
+headless device is most of the diagnosis. Preview gets the shorter deadline
+because a liveview frame queued behind a capture is stale by the time it lands —
+better to skip it and take a fresh one.
+
+The same reasoning applies to `close()`, which can therefore fail: if it can't
+take the bus it logs at `ERROR` that the USB claim stays open and re-raises, so
+the caller (`_drop_camera`, shutdown — both of which suppress it) doesn't block
+on a wedged handle either. The claim is released when the holding operation
+finally returns and the handle is collected.
 
 **2. `close()` is idempotent and race-safe.** It swaps `_cam` to `None` under the
 lock before calling `exit()`, so a second `close()` (or a `close()` racing an
@@ -137,8 +161,10 @@ The whole exposure runs under `_lock`, i.e. the sleep **holds the camera lock fo
 its full duration** — deliberately: no other PTP traffic (preview, telemetry,
 another capture) may share the bus during an open exposure, and the lock is what
 enforces that. The frontend tears its preview stream down for the same reason.
-Because the lock is held, a disconnect during a bulb can't be reaped until the
-exposure ends — the same cost any long exposure carries.
+Everything else that arrives during those seconds is refused with `CameraBusy`
+(→ 409, naming `bulb`) after `BUS_TIMEOUT` rather than queueing; a disconnect
+still can't be reaped until the exposure ends, which is the cost any long
+exposure carries.
 
 Unlike `capture()`, the body doesn't hand back a path synchronously: after the
 close it writes the frame asynchronously and announces it with a
@@ -274,7 +300,8 @@ the JPEG bytes (`get_data_and_size()`). Like every other op it runs under `_lock
 and grabs *one* frame per call — the caller (`app.py`'s `/api/liveview` MJPEG
 loop) reacquires the lock for each successive frame, so a capture, record, or
 settings write can interleave between frames instead of being starved by a
-long-held stream. It refuses with `RuntimeError` while `self.recording` is set:
+long-held stream. It is the one op with its own, shorter acquisition deadline
+(`PREVIEW_BUS_TIMEOUT`), for the reason given above. It refuses with `RuntimeError` while `self.recording` is set:
 issuing extra PTP `capture_preview` traffic on the bus while a movie is rolling
 risks disturbing the recording, so previews and recording are kept mutually
 exclusive (the frontend also tears its stream down when recording starts, so

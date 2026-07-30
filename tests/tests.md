@@ -1,6 +1,6 @@
 # Testing
 
-Pathfinder's test suite: 251 tests, `unittest` only, no third-party test
+Pathfinder's test suite: 295 tests, `unittest` only, no third-party test
 dependencies, and **no camera required**. The whole camera layer runs against a
 fake libgphoto2, so the suite is a normal edit-run-edit loop on a laptop rather
 than something you can only do at the rig.
@@ -22,10 +22,11 @@ tests/
 │   └── fake_camera.py    in-memory device, widget tree, and app-layer double
 ├── test_sony_quirks.py     9   vendor/model quirk resolution
 ├── test_gp2_helpers.py    37   coercion, clamping, describe, disconnect codes
-├── test_gp2_camera.py    101   Gphoto2Camera against a fake device
+├── test_gp2_camera.py    113   Gphoto2Camera against a fake device
 ├── test_app_models.py     27   request validation + the bulb ceiling
-├── test_app_routes.py     53   routes, error mapping, connection state machine
+├── test_app_routes.py     62   routes, error mapping, connection state machine
 ├── test_web_contract.py    9   web/ ↔ app.py seams (static text checks)
+├── test_watchdog.py       23   sd_notify, the heartbeat, and the systemd unit
 ├── test_fake_fidelity.py  13   does the double still resemble the real thing
 └── test_known_gaps.py      2   TODO.md hazards, as expected-to-fail tests
 ```
@@ -48,15 +49,18 @@ handles that for you.
 
 ### On the dev host vs. on the Pi
 
-The dev machine has no pip, no venv, and no `gphoto2`/`fastapi`, so **80 tests
+The dev machine has no pip, no venv, and no `gphoto2`/`fastapi`, so **109 tests
 skip there** — everything that needs FastAPI or pydantic — plus the 5 that
-compare the fake against the real binding. The remaining 166 execute, including
+compare the fake against the real binding. The remaining 181 execute, including
 the entire camera layer:
 
 ```
-Ran 251 tests in 0.18s
-OK (skipped=85, expected failures=2)
+Ran 295 tests in 1.2s
+OK (skipped=114, expected failures=2)
 ```
+
+(The run used to take 0.2s. The extra second is `BusTimeout`, which waits out
+real lock deadlines — see below.)
 
 To run the whole suite, use the Pi's venv (created by `setup.sh`), which has the
 real dependencies:
@@ -188,6 +192,36 @@ A transport error during a drain is asserted to be *logged and swallowed* — th
 capture that follows is where a dead bus gets attributed to a request, and it is
 still checked to reach the caller from there.
 
+**Nothing waits on the bus forever, and the process says so when it is stuck.**
+This is TODO #8, and it has three seams. (1) `BusTimeout` occupies the camera
+lock from a second thread — through `capture()`, so the contention is the real
+thing rather than a poked mutex — and pins that every other operation is refused
+with `CameraBusy` naming the holder, sends nothing to the body, and comes back
+inside the deadline; that a bus which frees up in time is still *waited for*
+rather than refused (the bound must not have become a try-lock); that `preview`
+gives up on its own shorter deadline; that `close` refusing leaves the handle
+alone and shouts about the USB claim; and that busy is not a disconnect, since
+misreading it would drop a healthy connection. These are the one place `FakeClock`
+can't help — `threading.Lock`'s timeout reads the real clock regardless of what
+`gp2.time` is patched to — so the *bounds* are shrunk instead of the clock, which
+is what costs the suite its extra second. The holding thread releases on a 10s
+`Event.wait`, so if the bound is ever removed these tests **fail slowly instead of
+hanging** — the same insurance as `test_the_bound_holds_on_the_real_clock`.
+(2) `BusyHandling` and `ConnectLock` pin the app-side halves: 409 rather than 400
+(the value wasn't wrong, and retrying it is the right move) with the connection
+kept, a liveview stream that pauses rather than ends when a capture takes the bus,
+and a wedged connect that neither hangs `/api/connect` nor kills the watcher.
+(3) `test_watchdog.py` covers the heartbeat, and its centre of gravity is
+`test_a_wedged_threadpool_withholds_the_ping`: a liveness ping that only proves
+the event loop is running would keep the unit looking healthy through exactly the
+outage it exists for. `test_the_probe_rides_the_same_pool_the_camera_operations_use`
+shrinks anyio's real thread limiter to one token and has a blocking call hold it,
+so the claim "the probe is a genuine round trip through the camera pool" is
+tested rather than asserted. `SystemdUnit` reads the unit heredoc out of
+`setup.sh` as text — the same trick `test_web_contract.py` uses — because a
+heartbeat is worthless if the unit never arms `WatchdogSec` or opens
+`NotifyAccess`, and neither file can see the other.
+
 **Writes reach the body correctly typed and in order.** `_coerce` is the boundary
 between JSON and libgphoto2's C types, and a float where an int belongs is
 `[-2] Bad parameters`. The α7 IV's `autofocus` toggle idles at 2 and needs a
@@ -288,10 +322,18 @@ risk sits.
   consumes it. (Using `TestClient` would pull in `httpx`, which the Pi doesn't
   otherwise need.)
 - **Concurrency beyond the camera mutex.** One test proves concurrent captures
-  serialise. Nothing covers many clients against one liveview stream (`TODO.md`
-  #10) or the absence of any operation timeout (#8).
-- **Deployment.** `setup.sh`, the AP configuration, the systemd unit and the
-  libgphoto2 build are untested.
+  serialise, and `BusTimeout` proves everything else is refused rather than
+  queued. Nothing covers many clients against one liveview stream (`TODO.md` #10).
+- **An operation that is actually stuck.** The bounded-wait tests all use a
+  *held* lock, never a hung `libgphoto2` call — nothing here can produce one. So
+  the suite pins what happens to the callers queued behind a wedge, not what
+  happens to the wedged call itself (nothing: it keeps its worker until the
+  process restarts).
+- **Deployment.** `setup.sh` as a whole, the AP configuration and the libgphoto2
+  build are untested; `SystemdUnit` in `test_watchdog.py` reads four directives
+  out of the unit heredoc as text, which is a contract check, not an install test.
+  Whether systemd actually aborts and restarts a stopped process is a
+  `kill -STOP` on the Pi (`TODO.md` #8).
 
 ### Manual checks the suite can't replace
 
@@ -306,6 +348,9 @@ After changing anything in `camera/`, on the rig:
 5. A short bulb exposure; confirm the shutter closes and the frame downloads.
 6. Unplug the camera mid-session; confirm the UI goes to "No camera connected"
    and recovers on replug without restarting the service.
+7. Start a long bulb and hit capture from a second browser; confirm the 409 says
+   `camera is busy with bulb` within ~2s and the live preview returns by itself
+   once the exposure ends.
 
 Step 6 is the one worth doing every time — it is the path with the field bug.
 

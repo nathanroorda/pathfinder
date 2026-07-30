@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import socket
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
@@ -70,13 +71,23 @@ def _try_connect(app: FastAPI) -> None:
 
 
 CAMERA_POLL_INTERVAL = 3.0
+CONNECT_TIMEOUT = 5.0
 _connect_lock = asyncio.Lock()
 
 
-async def _connect_if_needed(app: FastAPI) -> None:
-    async with _connect_lock:
+async def _connect_if_needed(app: FastAPI) -> bool:
+    try:
+        await asyncio.wait_for(_connect_lock.acquire(), CONNECT_TIMEOUT)
+    except asyncio.TimeoutError:
+        log.warning("a camera connect attempt has been in flight for over %.0fs "
+                    "— not queueing another behind it", CONNECT_TIMEOUT)
+        return False
+    try:
         if app.state.camera is None:
             await run_in_threadpool(_try_connect, app)
+    finally:
+        _connect_lock.release()
+    return True
 
 
 async def _camera_watcher(app: FastAPI) -> None:
@@ -85,16 +96,81 @@ async def _camera_watcher(app: FastAPI) -> None:
         await asyncio.sleep(CAMERA_POLL_INTERVAL)
 
 
+def _sd_notify(message: str) -> bool:
+    address = os.environ.get("NOTIFY_SOCKET")
+    if not address:
+        return False
+    if address.startswith("@"):
+        address = "\0" + address[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+            sock.connect(address)
+            sock.sendall(message.encode())
+    except OSError as exc:
+        log.debug("sd_notify(%r) failed: %r", message, exc)
+        return False
+    return True
+
+
+def _watchdog_interval() -> float | None:
+    raw = os.environ.get("WATCHDOG_USEC")
+    owner = os.environ.get("WATCHDOG_PID")
+    if not raw or (owner and owner != str(os.getpid())):
+        return None
+    try:
+        usec = int(raw)
+    except ValueError:
+        log.warning("ignoring malformed WATCHDOG_USEC=%r", raw)
+        return None
+    if usec <= 0:
+        return None
+    return usec / 2_000_000.0                # ping at half the deadline
+
+
+async def _pool_probe() -> None:
+    await run_in_threadpool(lambda: None)
+
+
+async def _watchdog(interval: float) -> None:
+    probe = None
+    try:
+        while True:
+            if probe is None:
+                probe = asyncio.create_task(_pool_probe())
+            await asyncio.sleep(interval)
+            if not probe.done():
+                log.error("threadpool has not answered a liveness probe in %.0fs "
+                          "— withholding the systemd watchdog ping", interval)
+                continue
+            if probe.exception() is not None:
+                log.warning("threadpool liveness probe raised: %r", probe.exception())
+            probe = None
+            _sd_notify("WATCHDOG=1")
+    finally:
+        if probe is not None:
+            probe.cancel()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.camera = None
     app.state.camera_warned = False
     _try_connect(app)
-    watcher = asyncio.create_task(_camera_watcher(app))
+    tasks = [asyncio.create_task(_camera_watcher(app))]
+    interval = _watchdog_interval()
+    if interval is None:
+        log.info("no systemd watchdog configured (WATCHDOG_USEC unset) — a hung "
+                 "process will not be restarted for us")
+    else:
+        _sd_notify("READY=1")
+        tasks.append(asyncio.create_task(_watchdog(interval)))
+        log.info("systemd watchdog armed; pinging every %.0fs", interval)
     yield
-    watcher.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await watcher
+    for task in tasks:
+        task.cancel()
+    for task in tasks:
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
     if app.state.camera is not None:
         if app.state.camera.recording:
             try:
@@ -131,6 +207,8 @@ async def _drop_camera(exc):
 async def _run_camera(method, *args):
     try:
         return await run_in_threadpool(method, *args)
+    except camera.CameraBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
         if camera.is_disconnect_error(exc):
             await _drop_camera(exc)
@@ -150,9 +228,11 @@ async def status():
 
 @app.post("/api/connect")
 async def connect():
-    await _connect_if_needed(app)
+    attempted = await _connect_if_needed(app)
     if app.state.camera is None:
-        raise HTTPException(status_code=503, detail="no camera found")
+        raise HTTPException(status_code=503, detail=(
+            "no camera found" if attempted
+            else "a camera connect attempt is already in flight"))
     return {"connected": True, "model": app.state.camera.model}
 
 
@@ -183,6 +263,7 @@ async def bulb(body: BulbExposure):
 
 LIVEVIEW_BOUNDARY = "pathfinderframe"
 LIVEVIEW_FRAME_INTERVAL = 1 / 30
+LIVEVIEW_RETRY_INTERVAL = 0.3
 
 
 @app.get("/api/liveview")
@@ -196,11 +277,15 @@ async def liveview(request: Request):
                 break
             try:
                 jpeg = await _run_camera(cam.preview)
-            except HTTPException:
-                break  # camera dropped (503); the watcher will rebuild it
+            except HTTPException as exc:
+                if exc.status_code != 409:
+                    break  # camera dropped (503); the watcher will rebuild it
+                log.debug("liveview frame skipped: %s", exc.detail)
+                await asyncio.sleep(LIVEVIEW_RETRY_INTERVAL)
+                continue
             except Exception as exc:
                 log.debug("liveview frame failed: %r", exc)
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(LIVEVIEW_RETRY_INTERVAL)
                 continue
             yield (
                 b"--" + LIVEVIEW_BOUNDARY.encode() + b"\r\n"

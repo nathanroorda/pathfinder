@@ -370,8 +370,50 @@ Line numbers refer to the state of the tree at commit `da23621`.
 - **Fix:** Add a wall-clock deadline (~1s) and return when it expires. Log, rather
   than silently swallow, errors that `is_disconnect_error()` would classify.
 
-### 8. 🟠 No operation can ever time out, and there is no watchdog
+### 8. 🧪 No operation can ever time out, and there is no watchdog
 
+- **Status:** Fix applied 2026-07-27 — **not yet verified on hardware.** Three
+  parts, matching the three ways a wedge propagated:
+  1. **Bounded bus acquisition.** Every `with self._lock:` in `gp2.py` is now
+     `with self._bus(name):`, which acquires with a `BUS_TIMEOUT` (2s) deadline
+     and raises `CameraBusy` — naming the operation that holds the bus — instead
+     of parking the caller's threadpool worker. `_run_camera` maps it to **409**,
+     and it is deliberately *not* a disconnect error, so a busy bus never drops a
+     healthy connection. `preview()` uses a shorter `PREVIEW_BUS_TIMEOUT` (0.25s),
+     since a liveview frame queued behind a capture is stale by the time it lands;
+     the MJPEG loop treats a 409 as "pause", not "stream over".
+  2. **Bounded connect-lock acquisition.** `_connect_if_needed` takes
+     `_connect_lock` via `wait_for(..., CONNECT_TIMEOUT)` and returns `False`
+     rather than queueing behind a wedged handshake, so the watcher survives it
+     and `/api/connect` answers 503 instead of hanging.
+  3. **systemd watchdog.** `WatchdogSec=30` + `NotifyAccess=main` in the unit,
+     `Restart=on-failure` → `Restart=always`, and a `_watchdog` task pinging
+     `WATCHDOG=1` over `$NOTIFY_SOCKET` at half the deadline (no `python-systemd`
+     dependency — the protocol is one datagram). The ping is **earned**: each
+     interval must be paid for by a round trip through the same threadpool the
+     camera ops use, so an exhausted pool — event loop idle and healthy, which is
+     exactly the failure mode — withholds the ping and systemd restarts the
+     process. Detection latency is up to ~2 intervals plus the deadline (~45s
+     worst case).
+  Unit-covered by `tests/test_gp2_camera.py::BusTimeout`,
+  `tests/test_app_routes.py::BusyHandling`/`ConnectLock`, and
+  `tests/test_watchdog.py` — full suite green in the Pi's venv 2026-07-27
+  (295 tests, nothing skipped, so the heartbeat and route tests ran against the
+  real FastAPI/anyio rather than being skipped as they are on the dev host).
+  That covers the *logic*; the systemd behaviour below is still unverified.
+- **Residual risk (unfixable in software):** a blocking C call cannot be
+  interrupted from Python, so the *stuck operation itself* is never cancelled —
+  it keeps its worker until libgphoto2 returns or the process is restarted. What
+  is bounded is everything queued behind it. A `close()` that cannot take the bus
+  now logs `ERROR … the USB claim stays open` and raises rather than blocking;
+  the claim is released when the holding operation finishes and the handle is
+  collected.
+- **To verify:** on the Pi — (a) start a long bulb and confirm a concurrent
+  `/api/capture` returns 409 `camera is busy with bulb` within ~2s while liveview
+  resumes on its own afterwards; (b) `systemctl show pathfinder -p WatchdogUSec
+  -p Restart` and `journalctl -u pathfinder | grep "watchdog armed"`;
+  (c) `kill -STOP` the process and confirm systemd aborts and restarts it within
+  ~30s; (d) confirm no spurious restarts over a long idle session.
 - **Where:** whole stack — `camera/gp2.py` (all `self._cam.*` calls),
   `app.py:110-117` (`_run_camera`), `setup.sh:161` (`Restart=on-failure`)
 - **Issue:** `cam.init()`, `capture()`, `file_get()`, `set_config()` are blocking C
@@ -852,9 +894,11 @@ These are the places it's weaker than it looks.
 
 ## Suggested order
 
-**Done:** #1, #5, #6, #37 (all verified on hardware). #2, #3, #4, #7 have fixes
-applied and unit coverage but are 🧪. #2/#3/#4 are dial-blocked, see below; #7
-needs a body that is actually noisy on the event stream.
+**Done:** #1, #5, #6, #37 (all verified on hardware). #2, #3, #4, #7, #8 have
+fixes applied and unit coverage but are 🧪. #2/#3/#4 are dial-blocked, see below;
+#7 needs a body that is actually noisy on the event stream; #8 needs a
+`systemctl`/`kill -STOP` session on the Pi (it also needs `setup.sh` re-run, or
+the unit edited by hand, to pick up `WatchdogSec`).
 
 **Blocked on physical access to the camera's mode dial** (needs M + BULB, and
 Long Exposure NR on): verifying #2, #3, and #38. Nothing else depends on this,
@@ -862,13 +906,12 @@ so it is not on the critical path — do the items below while it waits.
 
 1. **#38** — refuse `bulb` when the body is not in BULB (the discovery command is
    in that item; it needs the dial too, but only to *read* one value)
-2. **#8** — bounded lock acquisition + `WatchdogSec` (turns hangs into restarts)
-3. **#13, #14** — quirk layering and vendor contract, **before** adding Canon/Nikon
-4. **#17** — verify `changeafarea` / `bulb` / AF idle value on the rig
+2. **#13, #14** — quirk layering and vendor contract, **before** adding Canon/Nikon
+3. **#17** — verify `changeafarea` / `bulb` / AF idle value on the rig
    (batch this with the #2/#3/#38 dial session — same setup, one trip)
-5. **#9** — compare-and-swap in `_drop_camera`
-6. **#10** — single shared liveview producer (largest change; what makes multi-client work)
-7. Everything else, opportunistically
+4. **#9** — compare-and-swap in `_drop_camera`
+5. **#10** — single shared liveview producer (largest change; what makes multi-client work)
+6. Everything else, opportunistically
 
 #13 and #34 each have an `@expectedFailure` acceptance test already written in
 `tests/test_known_gaps.py` — start there. #5's and #6's have been promoted into

@@ -265,7 +265,6 @@ class DrainEvents(CameraTestCase):
 
 class Bulb(CameraTestCase):
     def _deliver_image_on_release(self, after_failures=0):
-        # Queued only on release; a pre-queued event would be eaten by the pre-exposure drain.
         remaining = [after_failures]
 
         def hook(method, *args):
@@ -803,6 +802,157 @@ class Serialisation(CameraTestCase):
 
         self.assertEqual(max(overlaps), 1)
         self.assertEqual(len(self.device.calls_named("capture")), 4)
+
+
+class BusTimeout(CameraTestCase):
+    # These are the one place FakeClock can't help: `_bus` bounds the wait with
+    # threading.Lock's own timeout, which reads the real clock no matter what
+    # gp2.time is patched to. So the bounds are shrunk instead of the clock.
+    def setUp(self):
+        super().setUp()
+        for name in ("BUS_TIMEOUT", "PREVIEW_BUS_TIMEOUT"):
+            patcher = mock.patch.object(gp2, name, 0.05)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.released = threading.Event()
+
+    def hold_the_bus(self):
+        # Occupied from another thread through the public API, so what the second
+        # caller runs into is exactly what a real in-flight capture looks like.
+        entered = threading.Event()
+
+        def hook(method, *args):
+            if method == "capture":
+                entered.set()
+                self.released.wait(10)
+        self.device.hook = hook
+        holder = threading.Thread(
+            target=lambda: self.cam.capture(save_dir=self.save_dir), daemon=True)
+
+        def let_go():
+            self.released.set()
+            holder.join(10)
+        self.addCleanup(let_go)
+
+        holder.start()
+        self.assertTrue(entered.wait(10), "the holding thread never took the bus")
+
+    def test_a_second_operation_is_refused_rather_than_queued_behind_the_first(self):
+        self.hold_the_bus()
+
+        with self.assertRaises(gp2.CameraBusy):
+            self.cam.telemetry()
+
+    def test_the_refusal_names_the_operation_holding_the_bus(self):
+        self.hold_the_bus()
+
+        with self.assertRaises(gp2.CameraBusy) as caught:
+            self.cam.telemetry()
+
+        self.assertIn("capture", str(caught.exception))
+
+    def test_the_wait_is_bounded_even_though_the_holder_is_not(self):
+        import time as real_time
+
+        self.hold_the_bus()
+
+        start = real_time.monotonic()
+        with self.assertRaises(gp2.CameraBusy):
+            self.cam.telemetry()
+
+        self.assertLess(real_time.monotonic() - start, 2.0)
+
+    def test_a_bus_that_frees_up_in_time_is_waited_for_not_refused(self):
+        with mock.patch.object(gp2, "BUS_TIMEOUT", 5.0):
+            self.hold_the_bus()
+            threading.Timer(0.05, self.released.set).start()
+
+            self.cam.telemetry()   # waits out the holder rather than refusing
+
+    def test_a_refused_operation_sends_nothing_to_the_body(self):
+        self.hold_the_bus()
+        before = len(self.device.calls)
+
+        with self.assertRaises(gp2.CameraBusy):
+            self.cam.set_setting("iso", "800")
+
+        self.assertEqual(len(self.device.calls), before)
+
+    def test_every_operation_refuses_a_held_bus(self):
+        self.hold_the_bus()
+        operations = {
+            "bulb": lambda: self.cam.bulb(1.0, save_dir=self.save_dir),
+            "preview": self.cam.preview,
+            "set_recording": lambda: self.cam.set_recording(True),
+            "autofocus": self.cam.autofocus,
+            "manual_focus": lambda: self.cam.manual_focus(1),
+            "set_af_point": lambda: self.cam.set_af_point(0.5, 0.5),
+            "list_settings": self.cam.list_settings,
+            "set_setting": lambda: self.cam.set_setting("iso", "800"),
+            "telemetry": self.cam.telemetry,
+            "close": self.cam.close,
+        }
+        for name, call in operations.items():
+            with self.subTest(operation=name):
+                with self.assertRaises(gp2.CameraBusy):
+                    call()
+
+    def test_a_second_capture_is_refused_too(self):
+        # Kept out of the loop above: it would deadlock against its own holder.
+        self.hold_the_bus()
+
+        with self.assertRaises(gp2.CameraBusy):
+            self.cam.capture(save_dir=self.save_dir)
+
+    def test_preview_gives_up_sooner_than_the_operations_worth_waiting_for(self):
+        import time as real_time
+
+        self.assertLess(gp2.PREVIEW_BUS_TIMEOUT, 1.0)
+        with mock.patch.object(gp2, "BUS_TIMEOUT", 30.0):
+            self.hold_the_bus()
+
+            start = real_time.monotonic()
+            with self.assertRaises(gp2.CameraBusy):
+                self.cam.preview()
+
+            self.assertLess(real_time.monotonic() - start, 2.0)
+
+    def test_being_busy_is_not_mistaken_for_a_disconnect(self):
+        # The app drops the connection on a disconnect; a busy bus is a healthy
+        # camera, so misreading it would tear down a working connection.
+        self.assertFalse(gp2.is_disconnect_error(gp2.CameraBusy("busy")))
+
+    def test_a_close_that_cannot_take_the_bus_leaves_the_handle_alone(self):
+        self.hold_the_bus()
+
+        with self.assertLogs("camera.gp2", level="ERROR") as captured:
+            with self.assertRaises(gp2.CameraBusy):
+                self.cam.close()
+
+        self.assertIn("USB claim", "\n".join(captured.output))
+        self.assertEqual(self.device.exit_count, 0)
+        self.assertIsNotNone(self.cam._cam)
+
+    def test_the_bus_is_usable_again_once_the_holder_finishes(self):
+        self.hold_the_bus()
+        with self.assertRaises(gp2.CameraBusy):
+            self.cam.telemetry()
+
+        self.released.set()
+
+        for _ in range(200):            # the holder still has to finish its download
+            try:
+                self.cam.telemetry()
+                break
+            except gp2.CameraBusy:
+                continue
+        else:
+            self.fail("the bus never came back after the holder let go")
+
+    def test_a_free_bus_is_never_refused(self):
+        self.cam.telemetry()
+        self.cam.telemetry()
+        self.assertFalse(lock_is_held(self.cam))
 
 
 class Connect(unittest.TestCase):
