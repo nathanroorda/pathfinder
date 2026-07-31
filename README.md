@@ -35,31 +35,39 @@ For a Pathfinder device that's already been provisioned:
 
 ```
 .
-├── app.py            FastAPI app: HTTP routes + serves the web UI
-├── app.md            Backend architecture: lifecycle, timeouts, the HTTP API table
-├── run.py            Entry point — starts the server (python run.py)
-├── log.py            Logging setup (called first, before anything is imported)
-├── log.md            Logging architecture: levels, journald, persistence caveats
-├── requirements.txt  Python dependencies
-├── setup.sh          Provisions a fresh Raspberry Pi (see "Provisioning" below)
 ├── TODO.md           Known issues and open work, by severity
+├── app/
+│   ├── __init__.py  Empty on purpose — see app.md ("Why app/__init__.py is empty")
+│   ├── app.py       FastAPI app: HTTP routes + serves the web UI
+│   └── app.md       Backend architecture: lifecycle, timeouts, the HTTP API table
 ├── camera/
 │   ├── __init__.py  Public interface: connect() / disconnect()
 │   ├── gp2.py       libgphoto2 backend: capture, liveview, recording, focus, settings
 │   ├── sony.py      Per-model quirks (timing, retry, focus widgets & modes)
 │   └── camera.md    Camera-layer internals: the bus lock, quirks, disconnect handling
+├── logs/
+│   ├── __init__.py  Public interface: configure_logging()
+│   ├── log.py       Logging setup (called first, before anything is imported)
+│   ├── log.md       Logging architecture: levels, journald, persistence caveats
+│   └── *.log        Runtime log files (gitignored)
 ├── web/
 │   ├── index.html  Page shell
 │   ├── script.js   Status polling, capture button, settings rendering
 │   ├── style.css   Styling
 │   └── web.md      Frontend behavior and the widget-descriptor contract it renders
+├── tools/
+│   ├── run.py            Entry point — starts the server (python tools/run.py)
+│   ├── requirements.txt  Python dependencies
+│   ├── setup.sh          Provisions a fresh Raspberry Pi (see "Provisioning" below)
+│   └── camera-dump.sh    Captures a camera's config as a test fixture
 └── tests/
     ├── tests.md    How the suite works and what it deliberately misses
     ├── fakes/      A fake libgphoto2 — the suite needs no camera
+    ├── fixtures/   Real gphoto2 dumps, captured off hardware
     └── test_*.py   unittest modules
 ```
 
-Each `.md` sits next to the code it documents. Start with **`app.md`** for the
+Each `.md` sits next to the code it documents. Start with **`app/app.md`** for the
 backend, **`camera/camera.md`** for anything touching the camera, and
 **`TODO.md`** before changing behavior — it records why several things are the
 way they are.
@@ -70,8 +78,9 @@ way they are.
 
 ## Architecture
 
-- **`app.py` / `run.py`** — a FastAPI app exposing a small REST API (`/api/status`, `/api/connect`, `/api/capture`, `/api/bulb`, `/api/liveview`, `/api/record/*`, `/api/autofocus`, `/api/focus`, `/api/afpoint`, `/api/telemetry`, `/api/settings`) and serving `web/` as static files. Runs under `uvicorn`. Every route is documented with its error cases in **`app.md`**.
+- **`app/app.py` / `tools/run.py`** — a FastAPI app exposing a small REST API (`/api/status`, `/api/connect`, `/api/capture`, `/api/bulb`, `/api/liveview`, `/api/record/*`, `/api/autofocus`, `/api/focus`, `/api/afpoint`, `/api/telemetry`, `/api/settings`) and serving `web/` as static files. Runs under `uvicorn`. Every route is documented with its error cases in **`app/app.md`**.
 - **`camera/`** — wraps the `gphoto2` Python binding. `gp2.py` handles connecting, capturing, live preview, recording, focus, and reading/writing settings; `sony.py` holds per-model quirks (timing, retry, focus widgets & modes) looked up by camera model string.
+- **`logs/`** — logging setup, and the directory runtime `*.log` files land in (gitignored). `tools/run.py` calls `configure_logging()` as its very first statement, before `app`/`camera` are imported, so their import-time log lines aren't lost. See **`logs/log.md`**.
 - **`web/`** — a small vanilla JS/HTML/CSS frontend. It shows a live preview and focus controls, renders whatever settings the connected camera reports (choice/toggle/range/text controls, built dynamically from the API response), and posts changes back.
 - **`tests/`** — a `unittest` suite that runs against a fake libgphoto2, so no camera (and no `gphoto2` install) is needed. See **`tests/tests.md`**.
 
@@ -86,7 +95,7 @@ No third-party test dependencies. On a machine without `fastapi`/`pydantic` the 
 
 ## Provisioning a New Device
 
-`setup.sh` takes a freshly flashed Raspberry Pi OS to a working Pathfinder. Run it once per device, before shipping.
+`tools/setup.sh` takes a freshly flashed Raspberry Pi OS to a working Pathfinder. Run it once per device, before shipping.
 
 **Before running it:** use Raspberry Pi Imager's advanced options to pre-configure your home WiFi and enable SSH, so the Pi is reachable without a monitor/keyboard.
 
@@ -94,8 +103,11 @@ No third-party test dependencies. On a machine without `fastapi`/`pydantic` the 
 ssh <user>@<pi-on-your-network>
 git clone https://github.com/nathanroorda/pathfinder.git
 cd pathfinder
-./setup.sh
+./tools/setup.sh
 ```
+
+It resolves the project root from its own location, so it works from any working
+directory — but it must stay in `tools/`, one level below the root.
 
 (HTTPS, not SSH — a freshly imaged Pi has no key on it yet.)
 
@@ -109,14 +121,21 @@ What it does — nine steps, re-runnable (each is safe to run again):
 6. Creates a Python venv and installs dependencies.
 7. Rebuilds the `gphoto2` Python binding from source against the source-built library.
 8. Creates the **Pathfinder** WiFi access point (NetworkManager hotspot at `10.42.0.1`).
-9. Installs and enables the `pathfinder` systemd service (starts `run.py` on boot, under a 30s systemd watchdog — see below).
+9. Installs and enables the `pathfinder` systemd service (starts `tools/run.py` on boot, under a 30s systemd watchdog — see below).
 
 It finishes by connecting to the camera and taking one test frame, so expect the shutter to fire once.
 
 Provisioning env toggles:
 - `FORCE_BUILD=1` — rebuild libgphoto2 even if already installed.
 - `AP_ON_BOOT=0` — create the AP profile but don't auto-start it on boot (keeps a home-WiFi fallback for development).
-- `PATHFINDER_NO_TMUX=1` — don't wrap the run in tmux (it does by default, so a dropped SSH session doesn't kill a half-finished build).
+
+The script does **not** wrap itself in a terminal multiplexer, so a dropped SSH
+session will kill a half-finished run. Over an unreliable link, start it inside
+one yourself:
+
+```
+tmux new -s setup ./tools/setup.sh     # reattach with: tmux attach -t setup
+```
 
 After it finishes, reboot — the AP and app both come up automatically.
 
@@ -129,8 +148,9 @@ journalctl -u pathfinder -f
 ### Runtime configuration
 
 Read from the environment at process start, so changing one needs a service
-restart. Set them via a systemd drop-in (`setup.sh` regenerates the unit file on
-every run, so an in-place edit gets overwritten) — `log.md` has the recipe.
+restart. Set them via a systemd drop-in (`tools/setup.sh` regenerates the unit
+file on every run, so an in-place edit gets overwritten) — `logs/log.md` has the
+recipe.
 
 | Variable | Default | Effect |
 |---|---|---|
@@ -145,7 +165,7 @@ systemd every 15s, but **only** after a round trip through the same thread pool
 the camera operations use — so a wedged `libgphoto2` call (which cannot be
 interrupted from Python) withholds the ping and systemd restarts the process
 within ~45s. This is why the service may restart itself with no error in the
-log; see the Troubleshooting note below, and `app.md` for the reasoning.
+log; see the Troubleshooting note below, and `app/app.md` for the reasoning.
 
 ## Troubleshooting
 

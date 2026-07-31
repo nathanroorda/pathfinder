@@ -15,9 +15,9 @@ from tests import support
 from tests.fakes.fake_camera import FakeConnectedCamera
 
 if support.have("pydantic") and support.have("fastapi"):
-    import app as app_module
+    import app.app as app_module
 
-SETUP_SH = os.path.join(support.REPO_ROOT, "setup.sh")
+SETUP_SH = os.path.join(support.REPO_ROOT, "tools", "setup.sh")
 
 
 def run(coro):

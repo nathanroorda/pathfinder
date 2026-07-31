@@ -6,15 +6,56 @@ usage pattern (a phone on the Pi's own WiFi AP), no database, no auth.
 
 ## Process & entry point
 
-- **`run.py`** — process entry point. Calls `log.configure_logging()` before
-  anything else so import-time log lines from `app`/`camera` are captured, then runs
-  `app:app` under `uvicorn` on `0.0.0.0:8080`. Started on boot by the `pathfinder`
-  systemd unit (installed by `setup.sh`), which also arms the watchdog — see
-  "Timeouts and the watchdog".
-- **`log.py`** — stdlib `logging.basicConfig` wrapper. Level comes from
-  `PATHFINDER_LOG_LEVEL` (default `DEBUG`).
-- **`app.py`** — the FastAPI app: HTTP routes, camera lifecycle management, and static
+- **`tools/run.py`** — process entry point. It lives in `tools/`, which means
+  `sys.path[0]` is `tools/` rather than the project root, so the first thing it
+  does is put the root on `sys.path`; without that, `from logs import ...` and
+  `from app.app import ...` both fail with `ModuleNotFoundError` no matter what
+  the working directory is (Python adds the *script's* directory to the path,
+  not the cwd). It then calls `logs.configure_logging()` before anything
+  else so import-time log lines from `app`/`camera` are captured, then hands the
+  imported `app` object to `uvicorn` on `0.0.0.0:8080` — it passes the object,
+  not an `"app.app:app"` import string, so there is no second import path to keep
+  in sync. Started on boot by the `pathfinder` systemd unit (installed by
+  `tools/setup.sh`), which also arms the watchdog — see "Timeouts and the
+  watchdog".
+- **`logs/`** — stdlib `logging.basicConfig` wrapper. Level comes from
+  `PATHFINDER_LOG_LEVEL` (default `DEBUG`). `configure_logging` is re-exported
+  from the package, so the import stays `from logs import configure_logging`
+  and must remain the first thing `tools/run.py` does after the `sys.path` bootstrap —
+  before `app`/`camera` are imported, or their import-time records are lost.
+- **`app/app.py`** — the FastAPI app: HTTP routes, camera lifecycle management, and static
   file serving for `web/`.
+
+### Why `app/__init__.py` is empty
+
+`camera/` and `logs/` both re-export a curated public surface from `__init__.py`.
+`app/` deliberately does not, and the reason is a name collision worth knowing
+about: the package is `app` and so is the module inside it, so
+`from .app import app` in `__init__.py` binds the *FastAPI instance* to the
+package attribute `app` — which then shadows the submodule. `import app.app`
+afterwards yields the FastAPI object rather than the module, and every test that
+reaches for an internal (`app_module._drop_camera`, `app_module.MAX_FOCUS_STEPS`)
+fails with `AttributeError`.
+
+So imports name the module explicitly:
+
+```python
+from app.app import app          # tools/run.py
+import app.app as app_module     # tests
+```
+
+The trap to avoid is writing `from app import app` with an empty `__init__.py`.
+That does **not** raise — Python falls back to importing the submodule, so the
+name binds to the *module* and `uvicorn.run()` fails later with a confusing
+error instead of at import. The 31 attributes the suite reaches for are listed
+implicitly by `tests/test_app_routes.py`; they include private helpers, which is
+why a curated re-export could not serve them even without the collision.
+
+`StaticFiles(directory="web")` at the bottom of `app/app.py` resolves against the
+**working directory**, not the file, so it is unaffected by this move — but it
+does mean the process must still be started from the repo root. The systemd unit
+sets `WorkingDirectory=$PROJECT_DIR`, and `tests/support.py` chdirs there for the
+same reason.
 
 ## Camera lifecycle
 
@@ -122,7 +163,7 @@ classic way to build a watchdog that never fires.
 
 ## HTTP API
 
-All routes are declared directly on the `FastAPI()` instance in `app.py` (no routers
+All routes are declared directly on the `FastAPI()` instance in `app/app.py` (no routers
 — the surface is small enough that splitting it out would be premature).
 
 | Method | Path | Behavior |
@@ -150,15 +191,15 @@ have had first refusal.
 
 ## `camera/` package — the gphoto2 boundary
 
-`app.py` never touches the `gphoto2` binding directly; everything goes through
+`app/app.py` never touches the `gphoto2` binding directly; everything goes through
 `camera/`, whose public surface is just five names re-exported from `gp2` (the
-only import `app.py` makes is `import camera`): `connect()`, `disconnect()`,
+only import `app/app.py` makes is `import camera`): `connect()`, `disconnect()`,
 `is_disconnect_error()`, and the `CameraDisconnected` / `CameraBusy` exceptions.
 
 `connect()` returns a `Gphoto2Camera` — one instance per physical connection that
 holds a `threading.Lock` guarding **every** hardware op (capture, preview, focus,
 recording, settings), because `run_in_threadpool` runs them on worker threads that
-would otherwise overlap inside libgphoto2. The methods `app.py` calls (`capture`,
+would otherwise overlap inside libgphoto2. The methods `app/app.py` calls (`capture`,
 `preview`, `set_recording`, `autofocus`, `manual_focus`, `list_settings`,
 `set_setting`) and the per-model quirk resolution in `sony.py` are documented in
 depth in **`camera.md`** — this section is only the app-facing boundary, not a
@@ -168,7 +209,7 @@ repeat of that.
 
 Two independent forms of serialization protect the single camera object:
 
-1. `asyncio.Lock` (`_connect_lock` in `app.py`) — serializes *connection attempts*
+1. `asyncio.Lock` (`_connect_lock` in `app/app.py`) — serializes *connection attempts*
    (watcher vs. explicit `/api/connect`).
 2. `threading.Lock` (`Gphoto2Camera._lock` in `gp2.py`) — serializes *operations on
    an already-connected camera* (capture vs. settings read/write), since those run

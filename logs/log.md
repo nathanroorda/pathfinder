@@ -2,18 +2,26 @@
 
 ## Components
 
-- **`log.py`** — one function, `configure_logging()`, called once at the top
-  of `run.py` before anything else is imported. It calls
+- **`logs/`** — a package, so `tools/run.py` imports `from logs import configure_logging`
+  rather than reaching at the module. `__init__.py` re-exports that one name and
+  pins it in `__all__`, the same contract `camera/__init__.py` uses: what is
+  re-exported is the public surface, everything else is internal. The directory
+  doubles as the destination for runtime `*.log` files, which `.gitignore`
+  excludes — nothing in the app writes them today (see "There is no file handler"
+  below), so they arrive only from a hand-configured drop-in.
+- **`logs/log.py`** — one function, `configure_logging()`, called once at the top
+  of `tools/run.py` (right after its `sys.path` bootstrap) before anything else
+  is imported. It calls
   `logging.basicConfig()`, which sets up the **root logger**: a single
   `StreamHandler` writing to **stderr** — `basicConfig()`'s default when no
   `stream=` is passed — formatted as
   `%(asctime)s %(levelname)-8s %(name)s: %(message)s`.
-- **Per-module loggers** — `app.py` and `camera/gp2.py` each get their own
+- **Per-module loggers** — `app/app.py` and `camera/gp2.py` each get their own
   logger via `logging.getLogger(__name__)` and log through it
   (`log.info(...)`, `log.warning(...)`, `log.debug(...)`). These loggers have
   no handlers of their own; log records propagate up to the root logger's
-  handler configured in `log.py`, which is what actually writes them out.
-- **`run.py`** disables uvicorn's own logging config (`log_config=None`) so
+  handler configured in `logs/log.py`, which is what actually writes them out.
+- **`tools/run.py`** disables uvicorn's own logging config (`log_config=None`) so
   uvicorn's request/access logs also flow through the same root logger
   instead of uvicorn setting up a separate, conflicting handler.
 
@@ -21,7 +29,7 @@ There is no file handler anywhere in the app. All log output goes to stderr
 only — including `INFO`/`DEBUG` records, which is standard for `logging` but
 surprises people expecting the usual stdout/stderr split by severity. It makes
 no difference under systemd, which captures both streams into the journal
-identically, but it matters the moment you run the app by hand: `python run.py >
+identically, but it matters the moment you run the app by hand: `python tools/run.py >
 out.txt` captures nothing, and `2>&1` is required to redirect the logs.
 
 ## Level control
@@ -32,7 +40,7 @@ Log level is set once, at process start, via an environment variable:
 PATHFINDER_LOG_LEVEL=DEBUG|INFO|WARNING|ERROR   (default: DEBUG)
 ```
 
-Read in `log.py`, converted to a `logging` level constant, and passed to
+Read in `logs/log.py`, converted to a `logging` level constant, and passed to
 `basicConfig(level=...)`. **Unset** defaults to `DEBUG` (`DEFAULT_LEVEL`); a value
 that isn't a real level name (e.g. a typo) falls back to `INFO`. Because it's read
 once at startup, changing it requires a process restart — there's no live reload.
@@ -40,7 +48,7 @@ once at startup, changing it requires a process restart — there's no live relo
 ## How the log stream becomes durable: systemd + journald
 
 Pathfinder runs as the `pathfinder` systemd service (installed by
-`setup.sh`). systemd captures a managed service's stdout/stderr by default
+`tools/setup.sh`). systemd captures a managed service's stdout/stderr by default
 and feeds it into `journald` — that's the *only* reason logs are visible
 after the app leaves the foreground. Nothing in the app itself writes to a
 log file or the journal directly; it's purely systemd's process supervision
@@ -52,7 +60,7 @@ app (stderr) → systemd (captures service stdout/stderr) → journald → journ
 
 ## Persistence caveat
 
-`setup.sh` does not configure `journald` storage. journald's default
+`tools/setup.sh` does not configure `journald` storage. journald's default
 (`Storage=auto` in `/etc/systemd/journald.conf`) means:
 
 - If `/var/log/journal/` exists → logs persist across reboots.
@@ -76,7 +84,7 @@ sudo systemctl restart systemd-journald
 
 Worth doing on any device that runs off battery/USB power in the field,
 since an unexpected power loss otherwise takes the logs with it. Not yet
-wired into `setup.sh`.
+wired into `tools/setup.sh`.
 
 ## Viewing logs
 
@@ -100,7 +108,7 @@ sudo systemctl restart pathfinder
 ```
 
 A drop-in is used instead of editing the generated unit file directly
-because `setup.sh` regenerates `/etc/systemd/system/pathfinder.service` on
+because `tools/setup.sh` regenerates `/etc/systemd/system/pathfinder.service` on
 every provisioning run and would overwrite an in-place edit.
 
 ## Saving a log sequence to a file
@@ -123,5 +131,5 @@ scp pathfinder@10.42.0.1:~/pathfinder.log ./debug.log    # export to local works
   logging is left on for extended periods, to bound flash usage on the SD
   card.
 - No file-based logging path independent of systemd — if the app is ever
-  run outside systemd (e.g. directly via `python run.py` during
+  run outside systemd (e.g. directly via `python tools/run.py` during
   development), logs only go to the terminal and aren't captured anywhere.

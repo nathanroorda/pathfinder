@@ -7,7 +7,7 @@ from tests import support
 REPO = support.REPO_ROOT
 SCRIPT_JS = os.path.join(REPO, "web", "script.js")
 INDEX_HTML = os.path.join(REPO, "web", "index.html")
-APP_PY = os.path.join(REPO, "app.py")
+APP_PY = os.path.join(REPO, "app", "app.py")
 
 
 def read(path):
@@ -42,7 +42,7 @@ class ApiRoutes(unittest.TestCase):
     def test_every_endpoint_the_browser_calls_exists(self):
         missing = self.client_paths() - self.server_routes()
         self.assertEqual(missing, set(),
-                         f"web/script.js calls routes app.py does not define: {missing}")
+                         f"web/script.js calls routes app/app.py does not define: {missing}")
 
     def test_the_known_client_endpoints_are_all_wired_up(self):
         self.assertEqual(self.client_paths(), {

@@ -1,0 +1,4 @@
+fastapi>=0.110          # web framework: routes + JSON (app/app.py)
+uvicorn>=0.29           # ASGI server that actually runs the app (tools/run.py)
+websockets>=12 
+gphoto2>=2.5            # Python binding for libgphoto2 — camera control (camera/gp2.py)

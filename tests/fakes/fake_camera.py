@@ -286,7 +286,7 @@ def default_config():
             FakeWidget("manualfocusdrive", gp.GP_WIDGET_RANGE, value=0.0, rng=(-7.0, 7.0, 1.0)),
             FakeWidget("bulb", gp.GP_WIDGET_TOGGLE, value=0),
             FakeWidget("movie", gp.GP_WIDGET_TOGGLE, value=0),
-            FakeWidget("changeafarea", gp.GP_WIDGET_TEXT, value=""),
+            FakeWidget("spotfocusarea", gp.GP_WIDGET_TEXT, value=""),
         ]),
         FakeWidget("status", gp.GP_WIDGET_SECTION, children=[
             FakeWidget("batterylevel", gp.GP_WIDGET_TEXT, value="87%",

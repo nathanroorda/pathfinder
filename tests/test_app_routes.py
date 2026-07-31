@@ -9,7 +9,7 @@ from camera import gp2
 from tests.fakes.fake_camera import FakeConnectedCamera
 
 if support.have("pydantic") and support.have("fastapi"):
-    import app as app_module
+    import app.app as app_module
     from fastapi import HTTPException
 
 

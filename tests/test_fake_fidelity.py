@@ -3,9 +3,12 @@ import re
 import unittest
 
 from tests import support
-from tests.fakes import fake_gphoto2
+from tests.fakes import dump, fake_gphoto2
 from tests.fakes.fake_camera import (FakeCameraFile, FakeConnectedCamera, FakeDevice, FakeWidget)
 
+import gphoto2 as gp
+
+from camera import gp2, sony
 from camera.gp2 import Gphoto2Camera
 
 
@@ -15,7 +18,7 @@ def read(path):
 
 
 GP2_TEXT = read(os.path.join(support.REPO_ROOT, "camera", "gp2.py"))
-APP_TEXT = read(os.path.join(support.REPO_ROOT, "app.py"))
+APP_TEXT = read(os.path.join(support.REPO_ROOT, "app", "app.py"))
 
 
 @unittest.skipIf(support.REAL_GPHOTO2 is None,
@@ -80,6 +83,159 @@ class CoversWhatTheCodeCalls(unittest.TestCase):
         self.assertGreater(len(constants), 5)
         missing = {name for name in constants if not hasattr(fake_gphoto2, name)}
         self.assertEqual(missing, set(), f"fake_gphoto2 is missing {missing}")
+
+
+class TheFixtureDirectoryIsWellFormed(unittest.TestCase):
+    def txt_files(self):
+        if not os.path.isdir(dump.FIXTURES):
+            return []
+        return sorted(n for n in os.listdir(dump.FIXTURES) if n.endswith(".txt"))
+
+    def test_no_two_dumps_describe_the_same_body(self):
+        seen = {}
+        for fixture in dump.fixtures():
+            seen.setdefault(fixture.model, []).append(fixture.name)
+
+        duplicated = {model: names for model, names in seen.items()
+                      if len(names) > 1}
+        self.assertEqual(duplicated, {},
+                         "two dumps for one body — delete the stale one")
+
+    def test_every_txt_file_is_a_usable_dump(self):
+        loaded = {fixture.name for fixture in dump.fixtures()}
+        unparseable = [name for name in self.txt_files() if name not in loaded]
+
+        self.assertEqual(unparseable, [],
+                         "not valid gphoto2 dumps — re-run tools/camera-dump.sh")
+
+
+@unittest.skipUnless(dump.fixtures(),
+                     "no hardware dumps in tests/fixtures/ — see its README")
+class EveryDumpedBodyMatchesItsQuirks(unittest.TestCase):
+    WIDGET_QUIRKS = ("movie_widget", "af_widget", "manual_focus_widget",
+                     "focus_mode_widget", "bulb_widget", "af_area_widget")
+
+    def vendor_matched(self):
+        for fixture in dump.fixtures():
+            quirks = gp2._quirks_for(fixture.model)
+            if quirks is not gp2.DEFAULT_QUIRKS:
+                yield fixture, quirks
+
+    def test_every_named_widget_exists_on_the_body(self):
+        checked = 0
+        for fixture, quirks in self.vendor_matched():
+            config = fixture.config()
+            for quirk in self.WIDGET_QUIRKS:
+                name = quirks[quirk]
+                if name is None:
+                    continue
+                with self.subTest(body=fixture.model, quirk=quirk, widget=name):
+                    self.assertIsNotNone(
+                        config.find(name),
+                        f"{quirk}={name!r} is not a widget on {fixture.model} "
+                        f"({fixture.name})")
+                    checked += 1
+        self.assertGreater(checked, 0, "no vendor-matched dump to check against")
+
+    def test_focus_mode_targets_are_real_choices_on_every_body(self):
+        for fixture, quirks in self.vendor_matched():
+            widget = fixture.config().find(quirks["focus_mode_widget"] or "")
+            if widget is None:
+                continue
+            choices = {widget.get_choice(i) for i in range(widget.count_choices())}
+            for quirk in ("af_target_mode", "mf_target_mode"):
+                with self.subTest(body=fixture.model, quirk=quirk):
+                    self.assertIn(quirks[quirk], choices)
+
+    def test_unclaimed_bodies_are_reported(self):
+        unclaimed = [f.model for f in dump.fixtures()
+                     if gp2._quirks_for(f.model) is gp2.DEFAULT_QUIRKS]
+        if unclaimed:
+            self.skipTest(f"no vendor quirks for: {', '.join(unclaimed)} — "
+                          f"add a module to camera/gp2.py VENDORS")
+
+
+@unittest.skipUnless(dump.fixture_for(dump.A7IV_MODEL),
+                     f"no dump for {dump.A7IV_MODEL} in tests/fixtures/")
+class TheQuirksMatchTheHardware(unittest.TestCase):
+    def setUp(self):
+        self.config = dump.a7iv_config()
+        self.quirks = sony.quirks(dump.A7IV_MODEL)
+
+    def test_the_fixture_is_the_body_the_quirks_target(self):
+        self.assertIsNotNone(self.quirks, "sony.quirks() did not match the a7 IV")
+        self.assertIsNotNone(self.config.find("iso"))
+
+    def choices_of(self, name):
+        widget = self.config.find(name)
+        return {widget.get_choice(i) for i in range(widget.count_choices())}
+
+    def test_the_focus_mode_targets_are_real_choices(self):
+        choices = self.choices_of(self.quirks["focus_mode_widget"])
+        for quirk in ("af_target_mode", "mf_target_mode"):
+            with self.subTest(quirk=quirk):
+                self.assertIn(self.quirks[quirk], choices)
+
+    def test_the_acceptable_focus_modes_overlap_the_body(self):
+        choices = self.choices_of(self.quirks["focus_mode_widget"])
+        for quirk in ("af_modes", "mf_modes"):
+            with self.subTest(quirk=quirk):
+                self.assertTrue(set(self.quirks[quirk]) & choices,
+                                f"{quirk} names no mode this body offers")
+
+    def test_the_manual_focus_steps_fit_the_widget_range(self):
+        widget = self.config.find(self.quirks["manual_focus_widget"])
+        self.assertEqual(widget.get_type(), gp.GP_WIDGET_RANGE)
+        self.assertEqual(widget.get_range(), (-7.0, 7.0, 1.0))
+
+    def test_the_af_and_bulb_drives_take_the_values_the_quirks_send(self):
+        for quirk in ("af_widget", "bulb_widget"):
+            with self.subTest(quirk=quirk):
+                widget = self.config.find(self.quirks[quirk])
+                self.assertEqual(widget.get_type(), gp.GP_WIDGET_TOGGLE)
+
+    def test_the_af_area_widget_takes_the_x_y_string_the_driver_sends(self):
+        widget = self.config.find(self.quirks["af_area_widget"])
+        self.assertEqual(widget.get_type(), gp.GP_WIDGET_TEXT)
+        self.assertFalse(widget.get_readonly())
+
+    def test_the_canon_name_is_gone_for_good(self):
+        self.assertIsNone(self.config.find("changeafarea"))
+        self.assertNotIn("changeafarea", sony.GENERAL.values())
+
+
+@unittest.skipUnless(dump.fixture_for(dump.A7IV_MODEL),
+                     f"no dump for {dump.A7IV_MODEL} in tests/fixtures/")
+class TheFixtureIsARealDump(unittest.TestCase):
+    def setUp(self):
+        self.config = dump.a7iv_config()
+
+    def sections(self):
+        return {s.get_name(): s.get_children()
+                for s in self.config.get_children()}
+
+    def test_it_carries_the_whole_tree_the_body_published(self):
+        counts = {name: len(kids) for name, kids in self.sections().items()}
+        self.assertEqual(counts, {"actions": 8, "settings": 2, "status": 7,
+                                  "imgsettings": 4, "capturesettings": 22,
+                                  "other": 347})
+
+    def test_the_raw_ptp_section_is_present_so_exclusion_is_worth_testing(self):
+        listed = {w.get_name()
+                  for w in gp2._settable_widgets(self.config)}
+        raw = {w.get_name() for w in self.sections()["other"]}
+
+        self.assertEqual(listed & raw, set())
+
+    def test_the_settable_surface_is_the_twenty_widgets_measured_on_the_body(self):
+        listed = [w.get_name() for w in gp2._settable_widgets(self.config)]
+        self.assertEqual(len(listed), 20)
+        self.assertNotIn("shutterspeed", listed)  # ro on this body
+        self.assertNotIn("f-number", listed)      # ro on this body
+
+    def test_parsing_a_dump_with_no_widget_blocks_is_an_error(self):
+        with self.assertRaises(ValueError):
+            dump.build_config("Camera summary:\nnothing here\n")
 
 
 class TheCameraContract(unittest.TestCase):

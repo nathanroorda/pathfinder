@@ -15,7 +15,7 @@ except Exception:
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-os.chdir(REPO_ROOT)  # app.py's StaticFiles(directory="web") resolves against cwd
+os.chdir(REPO_ROOT)  # app/app.py's StaticFiles(directory="web") resolves against cwd
 
 from .fakes import fake_gphoto2  # noqa: E402
 
@@ -34,7 +34,7 @@ def have(module_name):
 def requires(*module_names):
     missing = [name for name in module_names if not have(name)]
     return unittest.skipIf(
-        missing, f"requires {', '.join(missing)} (install with requirements.txt)")
+        missing, f"requires {', '.join(missing)} (install with tools/requirements.txt)")
 
 
 class FakeClock:

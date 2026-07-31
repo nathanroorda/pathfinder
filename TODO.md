@@ -7,7 +7,7 @@ correctness, then structure, then hardening.
 
 Each item states **what** is wrong, **why** it matters, and a suggested fix.
 Line numbers in #1-#38 refer to the state of the tree at commit `da23621` and
-are now several commits stale — `BulbExposure` has moved from `app.py:28` to
+are now several commits stale — `BulbExposure` has moved from `app/app.py:28` to
 `:50`, the `StaticFiles` mount from `:284` to `:392`. #39 onward are anchored to
 `d841aa4`.
 
@@ -29,7 +29,7 @@ are now several commits stale — `BulbExposure` has moved from `app.py:28` to
   FastAPI's array-shaped 422 `detail` — response confirmed to be
   `{"detail":[{"type","loc","msg",...}]}`. Worst case is now a bounded 900s lock,
   not unbounded — the lock-holding itself remains #8/#10.
-- **Where:** `app.py:28-29` (`BulbExposure`), `camera/gp2.py:101-121`
+- **Where:** `app/app.py:28-29` (`BulbExposure`), `camera/gp2.py:101-121`
 - **Issue:** `BulbExposure.seconds` is a bare `float`. The browser checks `> 0`
   (`web/script.js:165`); the server checks nothing. `POST /api/bulb {"seconds": 1e9}`
   is accepted. Because `bulb()` holds `self._lock` across `time.sleep(seconds)`,
@@ -206,7 +206,7 @@ are now several commits stale — `BulbExposure` has moved from `app.py:28` to
   `low..high` but never snap to the grid, so an off-grid value like `3.5` on a
   step-1 widget is still sent as-is. Unknown whether the a7 IV rounds or rejects;
   worth checking during the next rig session.
-- **Where:** `app.py:24-25` (`FocusStep`), `camera/gp2.py:189-195`,
+- **Where:** `app/app.py:24-25` (`FocusStep`), `camera/gp2.py:189-195`,
   `camera/gp2.py:296-301` (`_coerce`)
 - **Issue:** `FocusStep.steps` is an unbounded `int`. `_coerce` does `float(value)`
   with no reference to the widget's advertised `get_range()`. Per the hardware
@@ -229,13 +229,13 @@ are now several commits stale — `BulbExposure` has moved from `app.py:28` to
   definition of "a setting" and both paths use it: `list_settings` describes what
   it yields, `set_setting` resolves the name through `_settable_widget` against
   the same generator. The allowlist can no longer drift because there is only one
-  of it. An unmatched name raises `KeyError`, which `app.py` maps to **404**
+  of it. An unmatched name raises `KeyError`, which `app/app.py` maps to **404**
   (distinct from 400 "bad value") without dropping the connection.
 - **Blast radius, measured 2026-07-25:** on the a7 IV this takes the writable
   surface from every widget in the tree down to the **20 `choice` widgets** the
   listing offers. Read-only widgets, `GP_WIDGET_BUTTON`s, everything in `status`,
   and every drive in `actions` — `bulb`, `movie`, `autofocus`, `manualfocus`,
-  `changeafarea` — are now unreachable through this endpoint.
+  `spotfocusarea` — are now unreachable through this endpoint.
 - **Test:** promoted out of `test_known_gaps.py` into
   `tests/test_gp2_camera.py::SetSetting`, asserted as a round trip rather than a
   list: every name `list_settings` returns is writable, nothing else is, and a
@@ -252,7 +252,7 @@ are now several commits stale — `BulbExposure` has moved from `app.py:28` to
   `status` widget). `shuttertype` — a genuine listed setting — still returns 200
   with the full 20-item list, confirming the allowlist is not drawn too tight.
 
-- **Where:** `app.py:271-281` → `camera/gp2.py:235-241`
+- **Where:** `app/app.py:271-281` → `camera/gp2.py:235-241`
 - **Issue:** `list_settings()` carefully filters to `INCLUDE_SECTIONS` and drops
   read-only widgets (`gp2.py:224-233`). `set_setting()` re-checks **neither** — it
   calls `cfg.get_child_by_name(name)` on the whole config tree with a
@@ -420,13 +420,13 @@ are now several commits stale — `BulbExposure` has moved from `app.py:28` to
   (c) `kill -STOP` the process and confirm systemd aborts and restarts it within
   ~30s; (d) confirm no spurious restarts over a long idle session.
 - **Where:** whole stack — `camera/gp2.py` (all `self._cam.*` calls),
-  `app.py:110-117` (`_run_camera`), `setup.sh:161` (`Restart=on-failure`)
+  `app/app.py:110-117` (`_run_camera`), `tools/setup.sh:143` (`Restart=on-failure`)
 - **Issue:** `cam.init()`, `capture()`, `file_get()`, `set_config()` are blocking C
   calls into USB with no bound. If the camera wedges mid-PTP transaction — which
   Sony bodies demonstrably do, per the existing `-52` self-healing — the
   threadpool worker is gone permanently. `run_in_threadpool` uses AnyIO's default
   limiter of **40 workers**; each hang burns one until the process is dead. A
-  wedged `_try_connect` (`app.py:58`) is worse: it also holds `_connect_lock`, so
+  wedged `_try_connect` (`app/app.py:58`) is worse: it also holds `_connect_lock`, so
   `/api/connect` and the reconnect watcher hang with it.
 - **Why it matters:** The failure mode is a silently bricked field device.
   `Restart=on-failure` cannot help, because a hung process hasn't failed — it's
@@ -441,7 +441,7 @@ are now several commits stale — `BulbExposure` has moved from `app.py:28` to
 
 ### 9. 🟡 `_drop_camera` can close a freshly-reconnected camera
 
-- **Where:** `app.py:99-107`
+- **Where:** `app/app.py:99-107`
 - **Issue:** Read-then-clobber with no identity check:
   ```python
   old = app.state.camera
@@ -469,7 +469,7 @@ are now several commits stale — `BulbExposure` has moved from `app.py:28` to
 
 ### 10. 🟡 Liveview is a per-client stream against a single-owner resource
 
-- **Where:** `app.py:167-195`, `web/script.js:28-43`
+- **Where:** `app/app.py:167-195`, `web/script.js:28-43`
 - **Issue:** Each `<img src="/api/liveview">` opens its own generator grabbing the
   camera lock up to 30×/s, one threadpool task per frame. Three consequences:
   - Multi-client is the stated use case (phone + laptop on the AP), but N clients
@@ -480,7 +480,7 @@ are now several commits stale — `BulbExposure` has moved from `app.py:28` to
     blocking a threadpool worker on the lock for the whole exposure. ~40 of those
     and the server — including `/api/status` — stops responding.
   - During recording, `preview()` raises `RuntimeError` (`gp2.py:142`), caught by
-    the generic handler at `app.py:180`, which sleeps 0.3s and **retries forever**
+    the generic handler at `app/app.py:180`, which sleeps 0.3s and **retries forever**
     — a second client hammers the lock at 3.3 Hz for the whole take.
 - **Why it matters:** The camera is a single-owner resource with one bus; the
   current design lets client count determine hardware contention. Server-side
@@ -597,26 +597,34 @@ are now several commits stale — `BulbExposure` has moved from `app.py:28` to
 
 ### 17. 🟠 Verify three Sony quirk values against the real body
 
-- **Where:** `camera/sony.py:12-14`; `camera/camera.md:224` already flags AF-point
-  as best-guess
-- **Issue:** Raising the confidence level on *why* those guesses look wrong:
-  - **`af_area_widget: "changeafarea"` is a Canon EOS widget name.** libgphoto2's
-    PTP driver exposes `changeafarea` for Canon; Sony bodies generally don't have
-    it. `af_area_size: (640, 480)` is likewise Canon's liveview coordinate space.
-    The tap-to-focus feature added in `da23621` is quite likely a no-op on the
-    actual target body.
-  - **`bulb_widget: "bulb"` is also mostly a Canon convention.** Note the guard at
-    `gp2.py:107` checks `if not widget` — which *passes*, because the quirk is set
-    — so an absent widget produces a raw libgphoto2 error instead of the clean
-    "bulb is not supported on this body" message.
-  - **The `autofocus` toggle idles at `2`,** per the hardware notes, but
-    `af_drive_values` restores it to `0`. Probably benign; the widget is left in a
-    state the body doesn't consider idle.
-- **Why it matters:** Two shipped features may not work at all on the only
-  field-tested camera, and both fail with cryptic 400s rather than "unsupported."
-- **Fix:** `gphoto2 --list-all-config | grep -i -E 'af|bulb'` on the rig; correct
-  the table. Make the unsupported-widget path produce the friendly message by
-  probing the widget's existence at connect time rather than trusting the quirk.
+- **Status:** Two of three **resolved from a full `--list-all-config` dump**
+  2026-07-30, now checked in at `tests/fixtures/ilce_7m4.txt`. The remaining
+  sub-item needs the rig.
+  - ✅ **`af_area_widget` was wrong and is fixed.** Confirmed: `changeafarea`
+    appears **nowhere** in the α7 IV tree. The real widget is
+    `/main/actions/spotfocusarea` (`TEXT`, writable). Tap-to-focus had never
+    worked — `_drive_action` would raise `[-2] Bad parameters` — and the tests
+    were green because the fake published `changeafarea` too. Fixed in
+    `camera/sony.py`, with the fake rebuilt from the dump and
+    `test_fake_fidelity.TheQuirksMatchTheHardware` added to assert every quirk
+    widget name against real hardware output. Verified to fail against the
+    pre-fix quirk table.
+  - ✅ **`bulb_widget: "bulb"` is correct on this body.** `/main/actions/bulb`
+    exists, `TOGGLE`, writable, label "Bulb Mode". The Canon-convention worry was
+    unfounded here. (The *friendly-message* half of this item still stands — the
+    `if not widget` guard at `gp2.py:141` only checks the quirk is set, not that
+    the widget exists, so a body without it still gets a raw libgphoto2 error.)
+  - ⬜ **The idle-value question is open, and it is broader than AF.** The dump
+    shows **both** `autofocus` *and* `bulb` reporting `Current: 2`, while
+    `af_drive_values` releases AF to `0` and `bulb()` releases to `0`. So both
+    drives leave the widget in a state the body may not consider idle. Needs the
+    rig: read the value back after a release and see whether the body resets it
+    to 2 on its own.
+- **Remaining fix:** determine `af_area_size` empirically — the dump cannot
+  settle it, because `spotfocusarea` is a `TEXT` widget with an empty current
+  value and advertises no range. Set `af_area_size` to `(1, 1)`, tap each corner
+  of the preview, and read back what the body accepted. Also confirm the point
+  only moves when `focusarea` is one of the `Flexible Spot` choices.
 
 ### 18. 🟡 Whole-tree config writes where single-widget writes belong
 
@@ -633,7 +641,7 @@ are now several commits stale — `BulbExposure` has moved from `app.py:28` to
 
 ### 19. ⚪ Every setting change costs three full config reads
 
-- **Where:** `app.py:271-281`
+- **Where:** `app/app.py:271-281`
 - **Issue:** `set_setting` does a full `get_config`, then the handler returns
   `cam.list_settings()` which does another.
 - **Why it matters:** Combined with the 400ms debounce and range `change` events,
@@ -661,17 +669,17 @@ These are the places it's weaker than it looks.
 
 ### 21. 🟠 Every device ships with the same AP password
 
-- **Where:** `setup.sh:12` (`AP_PASS="pathfinder"`), published in `README.md:24`
+- **Where:** `tools/setup.sh:12` (`AP_PASS="pathfinder"`), published in `README.md:24`
 - **Issue:** A hardcoded, documented, 11-character PSK identical across all units.
 - **Why it matters:** Anyone in WiFi range gets full camera control — including the
   arbitrary widget writes of #6. A published default credential is not a
   credential.
 - **Fix:** Generate a random per-device PSK during provisioning and print it once
-  at the end of `setup.sh`.
+  at the end of `tools/setup.sh`.
 
 ### 22. 🟡 No authentication, binds `0.0.0.0:8080`
 
-- **Where:** `run.py:9`
+- **Where:** `tools/run.py:14`
 - **Issue:** Fine behind the AP. Not fine in the `AP_ON_BOOT=0` development mode the
   README explicitly recommends (`README.md:87`), where the entire home LAN gets
   unauthenticated shutter control.
@@ -682,7 +690,7 @@ These are the places it's weaker than it looks.
 
 ### 23. 🟡 CSRF on the body-less POST endpoints
 
-- **Where:** `app.py:138` (`/api/capture`), `app.py:210-217` (`/api/record/*`)
+- **Where:** `app/app.py:138` (`/api/capture`), `app/app.py:210-217` (`/api/record/*`)
 - **Issue:** These take no request body, so a plain auto-submitting
   `<form action="http://10.42.0.1:8080/api/record/start" method="post">` on any
   website fires them cross-origin. The JSON-body endpoints are incidentally
@@ -696,7 +704,7 @@ These are the places it's weaker than it looks.
 
 ### 24. 🟡 The service runs as the login user
 
-- **Where:** `setup.sh:156-160`
+- **Where:** `tools/setup.sh:138-142`
 - **Issue:** `User=$USER` — typically a member of `sudo`. No hardening directives.
 - **Why it matters:** Any RCE in the app is effectively root on the device.
 - **Fix:** A dedicated unprivileged `pathfinder` user in `plugdev` only, plus
@@ -718,7 +726,8 @@ These are the places it's weaker than it looks.
 
 ### 25. 🟠 libgphoto2 is built from an unpinned `master`
 
-- **Where:** `setup.sh:58` (library), `setup.sh:77` (CLI); `requirements.txt`
+- **Where:** `tools/setup.sh:40` (library), `tools/setup.sh:59` (CLI);
+  `tools/requirements.txt`
   (lower bounds only)
 - **Issue:** Every device provisioned on a different day gets a different library
   build. Python deps have the same problem — `fastapi>=0.110` resolves to whatever
@@ -728,12 +737,12 @@ These are the places it's weaker than it looks.
   apart.** Reproducible provisioning is the difference between "we shipped a known
   build" and "we shipped whatever was on master that morning."
 - **Fix:** Pin a tag or commit SHA for both repos. Pin exact versions in
-  `requirements.txt` (or add a lockfile), and record the built library version
+  `tools/requirements.txt` (or add a lockfile), and record the built library version
   somewhere queryable at runtime.
 
-### 26. 🟡 `setup.sh` re-run hazards
+### 26. 🟡 `tools/setup.sh` re-run hazards
 
-- **Where:** `setup.sh:46`, `:56`, `:76`, `:96`
+- **Where:** `tools/setup.sh:28`, `:38`, `:57`, `:78`
 - **Issue:**
   - `sudo apt full-upgrade -y` runs on *every* re-run and can break a working field
     device mid-update.
@@ -747,9 +756,9 @@ These are the places it's weaker than it looks.
 
 ### 27. 🟡 Logging defaults to DEBUG — real SD card wear
 
-- **Where:** `log.py:4` (`DEFAULT_LEVEL = "DEBUG"`)
+- **Where:** `logs/log.py:4` (`DEFAULT_LEVEL = "DEBUG"`)
 - **Issue:** On a Pi writing to persistent journald, with a 3-second reconnect poll
-  (`app.py:51`) and per-frame liveview debug lines (`app.py:181`).
+  (`app/app.py:51`) and per-frame liveview debug lines (`app/app.py:181`).
 - **Why it matters:** Flash endurance is a hard constraint on this platform, not a
   theoretical one — this is a wear-out failure with a slow fuse.
 - **Fix:** Default to `INFO`. Consider `Storage=volatile` in journald, or a
@@ -757,7 +766,7 @@ These are the places it's weaker than it looks.
 
 ### 28. ⚪ `logs/` is a dead directory
 
-- **Where:** `logs/debug.log`, `log.py:14`
+- **Where:** `logs/debug.log`, `logs/log.py:14`
 - **Issue:** `configure_logging` only calls `basicConfig` (stderr → journald).
   Nothing writes `logs/debug.log`; it's a stale artifact of an earlier design.
 - **Fix:** Delete it, or wire up a real file handler if one is actually wanted.
@@ -768,11 +777,11 @@ These are the places it's weaker than it looks.
 
 ### 29. ⚪ `os.environ.setdefault("LD_LIBRARY_PATH", ...)` is a no-op
 
-- **Where:** `app.py:13`
+- **Where:** `app/app.py:13`
 - **Issue:** glibc reads `LD_LIBRARY_PATH` at process start; setting it in-process
   does not affect later `dlopen` search paths. It works today only because of
-  `setup.sh:100` (`ld.so.conf.d`) and the systemd `Environment=` line
-  (`setup.sh:159`).
+  `tools/setup.sh:82` (`ld.so.conf.d`) and the systemd `Environment=` line
+  (`tools/setup.sh:141`).
 - **Why it matters:** It makes the `import camera` placement below it look
   load-bearing. Someone will "fix the lint" by hoisting the import and conclude
   nothing broke — which is true, but for the wrong reason.
@@ -780,8 +789,8 @@ These are the places it's weaker than it looks.
 
 ### 30. 🟡 Blocking USB I/O on the event loop during startup and shutdown
 
-- **Where:** `app.py:71` (`_try_connect`), `app.py:80` (`set_recording`),
-  `app.py:84` (`camera.disconnect`)
+- **Where:** `app/app.py:71` (`_try_connect`), `app/app.py:80` (`set_recording`),
+  `app/app.py:84` (`camera.disconnect`)
 - **Issue:** All three run directly on the event loop, not via
   `run_in_threadpool`.
 - **Why it matters:** Startup blocks the server on the USB handshake; shutdown can
@@ -791,17 +800,17 @@ These are the places it's weaker than it looks.
 
 ### 31. ⚪ CWD-relative paths
 
-- **Where:** `app.py:284` (`StaticFiles(directory="web")`), `camera/gp2.py:12`
+- **Where:** `app/app.py:284` (`StaticFiles(directory="web")`), `camera/gp2.py:12`
   (`CAPTURE_DIR = "captures"`)
 - **Issue:** Correct only because the systemd unit sets `WorkingDirectory`. Running
-  `python run.py` from anywhere else crashes at import or writes captures to a
+  `python tools/run.py` from anywhere else crashes at import or writes captures to a
   surprising location.
 - **Fix:** `Path(__file__).parent / "web"`, and resolve `CAPTURE_DIR` against the
   package root.
 
 ### 32. 🟡 A watcher crash silently ends all reconnection
 
-- **Where:** `app.py:61-64`
+- **Where:** `app/app.py:61-64`
 - **Issue:** If `_camera_watcher`'s body ever raises, the task dies. Nothing logs
   it and nothing restarts it.
 - **Why it matters:** The device would appear permanently "no camera connected"
@@ -810,7 +819,7 @@ These are the places it's weaker than it looks.
 
 ### 33. ⚪ Inconsistent error mapping across routes
 
-- **Where:** `app.py:259-268` (`/api/telemetry`, `/api/settings`), `app.py:138-145`
+- **Where:** `app/app.py:259-268` (`/api/telemetry`, `/api/settings`), `app/app.py:138-145`
   (`/api/capture`)
 - **Issue:** `/api/telemetry` and `/api/settings` have no generic handler, so
   gphoto2 errors become **500 + traceback**, while every sibling route maps them to
@@ -841,17 +850,18 @@ These are the places it's weaker than it looks.
 
 ### 36. ⚪ Unused dependency
 
-- **Where:** `requirements.txt:3` (`websockets>=12`)
+- **Where:** `tools/requirements.txt:3` (`websockets>=12`)
 - **Issue:** No WebSocket code anywhere in the tree.
 - **Fix:** Remove it.
 
 ### 37. ✅ FIXED — No tests
 
-- **Status:** Fixed 2026-07-25. `tests/` — **295 tests** (228 at the time of the
-  fix, 251 after #7), stdlib `unittest`, no third-party test dependencies. A fake
+- **Status:** Fixed 2026-07-25. `tests/` — **311 tests** (228 at the time of the
+  fix, 251 after #7, 295 before the hardware-fixture suite), stdlib `unittest`,
+  no third-party test dependencies. A fake
   `gphoto2` binding (`tests/fakes/`) is installed into `sys.modules` before
   `camera` is imported, so the whole camera layer runs with no libgphoto2 and no
-  camera attached (181 of 295 execute on the dev host, which has no pip). Covers
+  camera attached (197 of 311 execute on the dev host, which has no pip). Covers
   exactly what this item asked for: quirk resolution, `_coerce`, the
   error→HTTP-status mapping, and the disconnect/reconnect state machine. See
   `tests/tests.md`.
@@ -872,7 +882,7 @@ These are the places it's weaker than it looks.
 
 ### 38. 🟠 `bulb` reports success when the body is not in BULB mode
 
-- **Where:** `camera/gp2.py` (`bulb`), `app.py` (`/api/bulb`)
+- **Where:** `camera/gp2.py` (`bulb`), `app/app.py` (`/api/bulb`)
 - **Issue:** `bulb()` refuses only when the *quirk table* has no bulb widget. It
   never checks whether the body is in a state where driving that widget means
   anything. Found on the rig 2026-07-25 while attempting to verify #3: with the
@@ -906,8 +916,9 @@ consequences of the #8 fix that the docs written alongside it didn't account for
 
 ### 39. 🟠 A wedged USB handshake at boot becomes a silent restart loop
 
-- **Where:** `app.py:158` (`_try_connect` in `lifespan`), `app.py:160-166`
-  (watchdog task creation), `setup.sh:154` (`Type=simple`), `setup.sh:161-163`
+- **Where:** `app/app.py:158` (`_try_connect` in `lifespan`), `app/app.py:160-166`
+  (watchdog task creation), `tools/setup.sh:136` (`Type=simple`),
+  `tools/setup.sh:143-145`
 - **Issue:** `lifespan` calls `_try_connect(app)` **synchronously, before** the
   watchdog task exists. With `Type=simple` systemd starts the `WatchdogSec=30`
   timer at `exec`, not at `READY=1`, so the deadline is already running during
@@ -936,7 +947,7 @@ consequences of the #8 fix that the docs written alongside it didn't account for
 
 ### 40. 🟡 `_watchdog` is an unguarded task, and it fails *closed*
 
-- **Where:** `app.py:134-152`
+- **Where:** `app/app.py:134-152`
 - **Issue:** Same shape as #32 (`_camera_watcher` dying silently), but the
   consequences are inverted. If the loop body raises — `probe.exception()`
   returning something the code doesn't expect, anything non-`OSError` escaping
@@ -952,7 +963,7 @@ consequences of the #8 fix that the docs written alongside it didn't account for
 
 ### 41. 🟡 Shutdown during a bulb silently skips the cleanup it exists to perform
 
-- **Where:** `app.py:174-183` (`lifespan` teardown)
+- **Where:** `app/app.py:174-183` (`lifespan` teardown)
 - **Issue:** Both `set_recording(False)` and `camera.disconnect()` now go through
   `_bus(...)` with the 2s `BUS_TIMEOUT`, and both are wrapped in a bare
   `except Exception: pass`. While a bulb holds the bus (up to
@@ -971,27 +982,28 @@ consequences of the #8 fix that the docs written alongside it didn't account for
   test that holds the bus across shutdown, so the stated guarantee is pinned to
   the condition it actually holds under.
 
-### 42. 🟡 `requirements.txt` installs `gphoto2` twice, contradictorily
+### 42. 🟡 `tools/requirements.txt` installs `gphoto2` twice, contradictorily
 
-- **Where:** `requirements.txt:4`, `setup.sh:124` (step 6/9), `setup.sh:127-130`
+- **Where:** `tools/requirements.txt:4`, `tools/setup.sh:106` (step 6/9),
+  `tools/setup.sh:109-112`
   (step 7/9)
-- **Issue:** Step 6 installs `gphoto2` from `requirements.txt` as a PyPI wheel —
+- **Issue:** Step 6 installs `gphoto2` from `tools/requirements.txt` as a PyPI wheel —
   which **bundles its own libgphoto2** — and step 7 immediately force-reinstalls
   it from source against `/usr/local`. The first install is pure waste on a Pi,
   and the two disagree about which library the binding links.
 - **Why it matters:** The failure mode is exactly what steps 2-4 exist to
   prevent. If step 7 is ever skipped, interrupted, or reordered, the tree still
   has a working-looking `import gphoto2` — linked against the bundled library
-  with the Sony regression `setup.sh` builds from source to avoid. Two install
+  with the Sony regression `tools/setup.sh` builds from source to avoid. Two install
   paths for one dependency means the "which libgphoto2 am I actually running"
   question has no single answer, which compounds #25 (unpinned build).
-- **Fix:** Drop `gphoto2` from `requirements.txt` (leaving one install path,
+- **Fix:** Drop `gphoto2` from `tools/requirements.txt` (leaving one install path,
   step 7) and note in the file why it is deliberately absent. Optionally have
   step 7 assert the built extension resolves to `/usr/local` afterwards.
 
 ### 43. ⚪ `captures/` is not gitignored
 
-- **Where:** `.gitignore`, `camera/gp2.py:14` (`CAPTURE_DIR`), `setup.sh:158`
+- **Where:** `.gitignore`, `camera/gp2.py:14` (`CAPTURE_DIR`), `tools/setup.sh:140`
   (`WorkingDirectory`)
 - **Issue:** `CAPTURE_DIR` defaults to `"captures"`, CWD-relative, and the unit
   sets `WorkingDirectory=$PROJECT_DIR` — so every shot lands as an untracked file
@@ -1007,7 +1019,7 @@ consequences of the #8 fix that the docs written alongside it didn't account for
 
 ### 44. ⚪ `POST /api/settings/{name}` re-reads outside its own error mapping
 
-- **Where:** `app.py:389`
+- **Where:** `app/app.py:389`
 - **Issue:** The trailing `return await _run_camera(cam.list_settings)` sits
   **outside** the handler's `try`. A gphoto2 failure on the read-back is an
   unhandled 500 + traceback, while the identical failure on the write two lines
@@ -1030,18 +1042,18 @@ consequences of the #8 fix that the docs written alongside it didn't account for
 ### 46. ✅ FIXED — Documentation drift outside the README
 
 - **Status:** All four corrected 2026-07-30, in the same pass as the README.
-  No code changed — these were documentation-only inaccuracies. `log.md` now
+  No code changed — these were documentation-only inaccuracies. `logs/log.md` now
   states stderr and spells out the `2>&1` consequence for running outside
   systemd; `web.md` carries the `!bulbing` term and now lists all three
   `updateLiveview()` call sites, distinguishing *why* the stream is off during a
   recording (backend refuses) from during a bulb (backend accepts but the lock is
   held); `camera.md` attributes the settings/telemetry split to
-  `INCLUDE_SECTIONS` rather than the read-only filter; `requirements.txt` points
+  `INCLUDE_SECTIONS` rather than the read-only filter; `tools/requirements.txt` points
   at the right filename.
-- **Where:** `log.md:8,19-20,45`; `web/web.md:89`; `camera/camera.md:337`;
-  `requirements.txt:4`
+- **Where:** `logs/log.md:8,19-20,45`; `web/web.md:89`; `camera/camera.md:337`;
+  `tools/requirements.txt:4`
 - **Issue:** Four independent inaccuracies, none behavioural:
-  - **`log.md` says stdout three times.** `logging.basicConfig()` with no
+  - **`logs/log.md` says stdout three times.** `logging.basicConfig()` with no
     `stream=` uses **stderr** (verified). No impact under journald, which
     captures both — but the claim is wrong, and it matters the moment anyone
     pipes the app or redirects one stream.
@@ -1054,21 +1066,21 @@ consequences of the #8 fix that the docs written alongside it didn't account for
     filter at all. The real guarantee is *stronger* than the documented one; a
     writable widget in `status` would break the documented mechanism but not the
     actual one.
-  - **`requirements.txt:4`** comment points at `camera/gphoto2.py`; the file is
+  - **`tools/requirements.txt:4`** comment points at `camera/gphoto2.py`; the file is
     `camera/gp2.py`.
 - **Why it matters:** These docs are precise enough that they get trusted over
   the source. A doc that is right 95% of the time is read as authoritative, so
   the wrong 5% is more dangerous than a vague doc would be.
 - **Note:** `TODO.md`'s own stale test counts (#37 said 251/166) were corrected
-  in the same pass; the count is now 295/181, matching `tests/tests.md` and a
-  live run.
+  in the same pass, and again when the hardware-fixture suite landed; the count
+  is now 311/197, matching `tests/tests.md` and a live run.
 - **Residual:** nothing enforces this. All four drifted because no test can see
   a prose claim, and three of them (`web.md`, `camera.md`, `#37`'s counts) went
   stale because a *code* change had no corresponding doc edit. The cheap partial
   fix is to extend the `test_web_contract.py` trick — parse the doc, assert
   against the source — for the handful of claims that are mechanically
   checkable: the `updateLiveview()` predicate, the test count in `tests.md`, the
-  route table in `app.md`. Filed as a candidate, not a commitment; most of what
+  route table in `app/app.md`. Filed as a candidate, not a commitment; most of what
   these docs say is reasoning, which no test can pin.
 
 ### 47. ⚪ Nits
@@ -1090,7 +1102,7 @@ which are documentation-only).
 #2, #3, #4, #7, #8 have fixes applied and unit coverage but are 🧪. #2/#3/#4 are
 dial-blocked, see below; #7 needs a body that is actually noisy on the event
 stream; #8 needs a `systemctl`/`kill -STOP` session on the Pi (it also needs
-`setup.sh` re-run, or the unit edited by hand, to pick up `WatchdogSec`).
+`tools/setup.sh` re-run, or the unit edited by hand, to pick up `WatchdogSec`).
 
 **Blocked on physical access to the camera's mode dial** (needs M + BULB, and
 Long Exposure NR on): verifying #2, #3, and #38. Nothing else depends on this,
@@ -1103,7 +1115,8 @@ so it is not on the critical path — do the items below while it waits.
 2. **#38** — refuse `bulb` when the body is not in BULB (the discovery command is
    in that item; it needs the dial too, but only to *read* one value)
 3. **#13, #14** — quirk layering and vendor contract, **before** adding Canon/Nikon
-4. **#17** — verify `changeafarea` / `bulb` / AF idle value on the rig
+4. **#17** — mostly closed from the config dump; what's left needs the rig:
+   `af_area_size` corner-taps and the `autofocus`/`bulb` idle value
    (batch this with the #2/#3/#38 dial session — same setup, one trip)
 5. **#9** — compare-and-swap in `_drop_camera`
 6. **#41** — batch with #30 and #32; all three are the same lifespan/task-hygiene

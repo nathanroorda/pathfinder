@@ -560,7 +560,7 @@ class ManualFocus(CameraTestCase):
 class AfPoint(CameraTestCase):
     def test_centre_tap_maps_to_the_middle_of_the_af_grid(self):
         self.cam.set_af_point(0.5, 0.5)
-        self.assertEqual(self.driven(), [("changeafarea", "320,240")])
+        self.assertEqual(self.driven(), [("spotfocusarea", "320,240")])
 
     def test_corners_map_to_the_grid_bounds(self):
         self.cam.set_af_point(0.0, 0.0)
@@ -569,7 +569,7 @@ class AfPoint(CameraTestCase):
 
     def test_out_of_range_taps_are_clamped_not_rejected(self):
         self.cam.set_af_point(-3.0, 12.0)
-        self.assertEqual(self.driven(), [("changeafarea", "0,480")])
+        self.assertEqual(self.driven(), [("spotfocusarea", "0,480")])
 
     def test_unsupported_on_a_body_with_no_af_area_widget(self):
         cam = gp2.Gphoto2Camera(self.device, GENERIC)
@@ -595,7 +595,7 @@ class ListSettings(CameraTestCase):
                           "focusmode", "datetime"])
 
     def test_action_widgets_are_never_exposed_as_settings(self):
-        for hidden in ("bulb", "movie", "autofocus", "manualfocus", "changeafarea"):
+        for hidden in ("bulb", "movie", "autofocus", "manualfocus", "spotfocusarea"):
             self.assertNotIn(hidden, self.names())
 
     def test_status_widgets_are_not_settings(self):
@@ -665,7 +665,7 @@ class SetSetting(CameraTestCase):
         listed = {s["name"] for s in self.cam.list_settings()}
 
         for name in ("bulb", "movie", "autofocus", "autofocusdrive",
-                     "manualfocus", "manualfocusdrive", "changeafarea",
+                     "manualfocus", "manualfocusdrive", "spotfocusarea",
                      "batterylevel", "lensname", "imagequality",
                      "liveviewsize", "no-such-widget"):
             with self.subTest(name=name):

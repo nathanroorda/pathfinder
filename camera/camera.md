@@ -1,7 +1,7 @@
 # Camera Layer
 
 The `camera/` package is Pathfinder's **hardware boundary**: the only code that
-imports the `gphoto2` binding and touches USB. Everything above it (`app.py`, and
+imports the `gphoto2` binding and touches USB. Everything above it (`app/app.py`, and
 by extension `web/`) talks to a camera exclusively through this package's small
 public surface, so the rest of the app has no `gphoto2`-shaped types leaking into
 it and stays camera-agnostic.
@@ -9,11 +9,11 @@ it and stays camera-agnostic.
 This document covers the package internals — the connection object, the widget
 data model, quirks, and disconnect classification. For how the *app* drives this
 layer (the connection lifecycle, the background reconnect watcher, and the
-`asyncio` vs. `threading` split), see **`app.md`**; that context isn't repeated
+`asyncio` vs. `threading` split), see **`app/app.md`**; that context isn't repeated
 here.
 
 ```
-app.py ──import camera──▶ camera/__init__.py ──▶ gp2.py ──▶ libgphoto2 (USB)
+app/app.py ──import camera──▶ camera/__init__.py ──▶ gp2.py ──▶ libgphoto2 (USB)
                                                     │
                                                     └──▶ sony.py (per-model quirks)
 ```
@@ -23,7 +23,7 @@ app.py ──import camera──▶ camera/__init__.py ──▶ gp2.py ──�
 - **`__init__.py`** — the public surface. Re-exports exactly five names from
   `gp2`: `connect`, `disconnect`, `is_disconnect_error`, and the
   `CameraDisconnected` / `CameraBusy` exceptions, and pins them in `__all__`.
-  `app.py`'s only import from this package is `import camera`, so this list *is*
+  `app/app.py`'s only import from this package is `import camera`, so this list *is*
   the contract — anything not re-exported here is a package-internal detail.
   (The exceptions are `CapWords` because they're classes; the rest are
   `snake_case` functions — the standard Python split, not an inconsistency.)
@@ -40,7 +40,7 @@ app.py ──import camera──▶ camera/__init__.py ──▶ gp2.py ──�
 model string off `get_abilities()` — falling back to a generic
 `"USB camera (gphoto2)"` label if the body doesn't report one — and wraps the
 handle in a `Gphoto2Camera`. `disconnect(camera)` just delegates to the object's
-`close()`. Both are synchronous and blocking; `app.py` is responsible for keeping
+`close()`. Both are synchronous and blocking; `app/app.py` is responsible for keeping
 them off the event loop (via `run_in_threadpool`).
 
 ## `Gphoto2Camera` — one instance per physical connection
@@ -52,7 +52,7 @@ design points drive everything else in the class:
 (a `threading.Lock`) wraps the body of `capture`, `bulb`, `preview`,
 `set_recording`, `autofocus`, `manual_focus`, `set_af_point`, `list_settings`,
 `set_setting`, `telemetry`, and `close`.
-This matters because `app.py` runs these on threadpool workers — without the
+This matters because `app/app.py` runs these on threadpool workers — without the
 lock, a capture and a settings write could execute inside libgphoto2
 concurrently, which the binding doesn't tolerate. `_require_open()` (called at the
 top of each locked block) raises `CameraDisconnected` if `close()` has already
@@ -69,7 +69,7 @@ an unbounded `with self._lock:` would then consume one more worker per queued
 request until the pool (40) is gone and the process is inert while still very much
 "running" (TODO #8). Bounding the *wait* can't rescue the stuck operation — no
 Python-level timeout can interrupt a C call — but it keeps one wedge from taking
-the server with it. `app.py` maps `CameraBusy` to **409**; it is deliberately
+the server with it. `app/app.py` maps `CameraBusy` to **409**; it is deliberately
 *not* a disconnect error, so a busy bus never tears down a healthy connection.
 The refusal names the current holder (`camera is busy with bulb`), which on a
 headless device is most of the diagnosis. Preview gets the shorter deadline
@@ -89,7 +89,7 @@ in-flight op) is a clean no-op rather than a double-free of the USB handle.
 ### The `recording` flag — a deliberate lock exception
 
 `self.recording` is *written* under `_lock` inside `set_recording`, but *read*
-lock-free by `app.py`'s `/api/status` route. That's intentional and safe: a lone
+lock-free by `app/app.py`'s `/api/status` route. That's intentional and safe: a lone
 `bool` read/write is atomic under the GIL, so status polling never needs to wait
 on an in-flight capture just to learn the recording state. Only the
 check-then-act inside `set_recording` (compare requested state to current, no-op
@@ -133,7 +133,7 @@ Runs entirely under `_lock`, in four steps:
    collisions. Returns the saved path.
 
 A capture is refused with `RuntimeError` if `self.recording` is set — stills and
-video are mutually exclusive on the body — which `app.py` surfaces as a 409.
+video are mutually exclusive on the body — which `app/app.py` surfaces as a 409.
 
 The download half (make dir → timestamp-prefix the name → `file_get().save()`) is
 factored into `_download(path, save_dir)`, shared with `bulb()`.
@@ -237,7 +237,7 @@ RMW on an ISR-shared register in a critical section). `acceptable` is a *set* of
 modes, not one value: if the live mode is already in it, the helper returns
 without writing — idempotent, and it leaves the user's own `AF-C`/`DMF` choice
 alone. Only when the mode is unacceptable does it switch to `target`. It returns
-the effective mode (which `autofocus`/`manual_focus` return on up to `app.py`, so
+the effective mode (which `autofocus`/`manual_focus` return on up to `app/app.py`, so
 the API can report it and the UI can refresh the now-stale `focusmode` row), or
 `None` when the body opts out of mode management (`focus_mode_widget` is `None`).
 
@@ -279,25 +279,35 @@ top-left — i.e. "a fraction of the way across the frame," carrying no knowledg
 the body's coordinate grid. `_scale(fraction, size)` clamps to `[0, 1]` (a stray
 tap outside the image can't push the point off-sensor) and maps onto the body's
 native grid from the `af_area_size` quirk, and the two integers are handed to the
-`af_area_widget` (`"changeafarea"` on Sony) as a `"x,y"` string — a `TEXT` widget,
+`af_area_widget` (`"spotfocusarea"` on Sony) as a `"x,y"` string — a `TEXT` widget,
 so `_coerce` passes it through untouched. Refused with `RuntimeError` (→ 400) if
 `af_area_widget` is `None`. Like the focus actions it's driven directly through
 `_drive_action`, not shown as a settings row.
 
-> **Body specifics to verify on hardware.** Two values here are best-guesses until
-> checked against a live α7 IV, both isolated in the quirk table so a correction
-> is one line: (1) `af_area_size` — the native grid the fraction scales onto,
-> defaulted to `(640, 480)`; confirm the accepted range with `gphoto2 --get-config
-> changeafarea` (or by trying corner taps). (2) The widget requires a **spot /
-> flexible focus-area mode** — in a Wide mode the point can't move and the body
-> ignores or rejects the write. Managing that mode automatically (à la
+> **The widget name was wrong until 2026-07-30.** This quirk read `"changeafarea"`
+> — the Canon EOS name — and `/main/actions/changeafarea` does not exist anywhere
+> in the α7 IV tree, so `/api/afpoint` could only ever have raised
+> `[-2] Bad parameters`. The hardware dump in `tests/fixtures/ilce_7m4.txt`
+> settles it: the widget is `/main/actions/spotfocusarea`, `TEXT`, writable.
+> The tests missed it because the fake published `changeafarea` too — it was
+> built from this quirk table rather than from a body. See
+> `tests/fixtures/fixtures.md`.
+
+> **Still to verify on hardware.** (1) `af_area_size` — the native grid the
+> fraction scales onto, still defaulted to Canon's `(640, 480)`. The dump can't
+> settle this one: `spotfocusarea` is a `TEXT` widget reporting an empty current
+> value, so it advertises no range. Corner taps are the way — set `(1, 1)`, tap
+> each corner, and read back what the body accepted. (2) The widget requires a
+> **spot / flexible focus-area mode** — in a Wide mode the point can't move and
+> the body ignores or rejects the write. The `focusarea` widget on this body does
+> offer `Flexible Spot: S/M/L`, so managing that mode automatically (à la
 > `_ensure_focus_mode`) is a natural follow-up if it proves fiddly in practice.
 
 ### `preview()`
 
 Pulls a single **liveview frame** by calling `capture_preview()` and returning
 the JPEG bytes (`get_data_and_size()`). Like every other op it runs under `_lock`
-and grabs *one* frame per call — the caller (`app.py`'s `/api/liveview` MJPEG
+and grabs *one* frame per call — the caller (`app/app.py`'s `/api/liveview` MJPEG
 loop) reacquires the lock for each successive frame, so a capture, record, or
 settings write can interleave between frames instead of being starved by a
 long-held stream. It is the one op with its own, shorter acquisition deadline
@@ -323,7 +333,7 @@ Pathfinder reflects whatever the connected body exposes:
 - **`set_setting(name, value)`** resolves the name through `_settable_widget`
   against that *same* generator, coerces `value` to the type gphoto2 expects for
   that widget kind (`_coerce`), and writes it back with `set_config()`. A name
-  outside the allowlist raises `KeyError`, which `app.py` maps to **404**.
+  outside the allowlist raises `KeyError`, which `app/app.py` maps to **404**.
   Having one definition shared by both paths is the point: they previously
   drifted, and `set_setting` resolved names against the *whole* tree — so
   `POST /api/settings/bulb` reached the shutter release through an endpoint that
@@ -393,10 +403,10 @@ exists on gphoto2 errors. `_DISCONNECT_CODES` is built with `getattr`/`hasattr`
 so it degrades gracefully across libgphoto2 versions that may not define every
 constant.
 
-`app.py` uses this predicate (in `_run_camera`) to decide between dropping the
+`app/app.py` uses this predicate (in `_run_camera`) to decide between dropping the
 connection for a background rebuild (503, self-healing) and passing the error
 through (400/409). That recovery flow — and why a dead handle would otherwise fail
-identically forever — is documented in **`app.md`**.
+identically forever — is documented in **`app/app.md`**.
 
 ## `sony.py` — per-model quirks
 
@@ -436,7 +446,7 @@ The quirk keys:
 | `mf_modes` | modes in which `manualfocus` drives the motor | `("Manual",)` | `()` |
 | `mf_target_mode` | mode to switch to for manual focus when outside `mf_modes` | `"Manual"` | `None` |
 | `bulb_widget` | config name of the bulb-release action (`None` = unsupported) | `"bulb"` | `None` |
-| `af_area_widget` | config name of the AF-area/point action (`None` = unsupported) | `"changeafarea"` | `None` |
+| `af_area_widget` | config name of the AF-area/point action (`None` = unsupported) | `"spotfocusarea"` | `None` |
 | `af_area_size` | native AF-grid size `(w, h)` the normalized tap is scaled onto | `(640, 480)` | `(0, 0)` |
 
 `gp2._quirks_for(model)` walks each module in `VENDORS = [sony]` in order, taking
@@ -448,17 +458,28 @@ fallback — because a *silent* fallback to generic widget names is exactly what
 made the focus `-2` so hard to find. If focus misbehaves on a new body, that
 warning line is the first thing to check.
 
+**Every widget name in that table is checked against real hardware.** The dumps
+in `tests/fixtures/` are captured off actual bodies, and
+`test_fake_fidelity.EveryDumpedBodyMatchesItsQuirks` asserts that each name a
+quirk table uses exists in the tree of every body the table claims. Nothing else
+catches a wrong name before it reaches USB — `get_single_config` raises `[-2] Bad
+parameters` at runtime and no earlier layer looks. That check is why
+`af_area_widget` is now known-good rather than assumed; see `tests/tests.md` for
+why the *target* modes are asserted strictly while `af_modes` / `mf_modes` are
+only required to overlap.
+
 **Adding a vendor:** create a module exposing a `quirks(model)` function with the
 same contract and append it to `VENDORS`. **Adding a model to an existing
 vendor:** add an entry to that vendor's `MODELS` keyed by a distinctive substring
 of the *reported* model string (check it with `GET /api/status` or
 `get_abilities().model` — don't assume the internal name); an empty dict means
 "use the vendor defaults," which is what the α7 IV (`"A7 IV"`) currently does. No
-changes to `gp2.py` are needed for either.
+changes to `gp2.py` are needed for either. Capture a dump for the new body with
+`tools/camera-dump.sh` at the same time — see `tests/fixtures/fixtures.md`.
 
 ## Logging
 
 All modules here log through a per-module `logging.getLogger(__name__)` and never
 configure handlers themselves — records propagate to the root logger set up by
-`log.py`. See **`log.md`** for the logging architecture; the `DEBUG` level (the
+`logs/log.py`. See **`logs/log.md`** for the logging architecture; the `DEBUG` level (the
 current default) is what surfaces the capture-retry and reconnect breadcrumbs.

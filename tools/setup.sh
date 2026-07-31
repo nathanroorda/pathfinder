@@ -5,40 +5,22 @@ LIBGPHOTO2_REPO="https://github.com/gphoto/libgphoto2.git"
 BUILD_DIR="$HOME/libgphoto2"
 GPHOTO2_CLI_REPO="https://github.com/gphoto/gphoto2.git"
 GPHOTO2_CLI_BUILD_DIR="$HOME/gphoto2-cli"
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
  
 AP_CONN="pathfinder-ap"
 AP_SSID="Pathfinder"
 AP_PASS="pathfinder"
 AP_CHANNEL="6"
-AP_ON_BOOT="${AP_ON_BOOT:-1}"
+AP_ON_BOOT="${AP_ON_BOOT:-0}"
  
 SERVICE="pathfinder"
-TMUX_SESSION="pathfinder-setup"
-SCRIPT_PATH="$PROJECT_DIR/$(basename "${BASH_SOURCE[0]}")"
  
 say()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m!  %s\033[0m\n' "$*"; }
 die()  { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
  
-if [ -z "${TMUX:-}" ] && [ -z "${PATHFINDER_NO_TMUX:-}" ]; then
-  if ! command -v tmux >/dev/null 2>&1; then
-    sudo apt-get update -qq && sudo apt-get install -y tmux || true
-  fi
-  if ! command -v tmux >/dev/null 2>&1; then
-    warn "tmux unavailable — continuing without crash protection."
-  elif tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
-    echo "A setup session is already running — attaching you to it."
-    exec tmux attach -t "$TMUX_SESSION"
-  else
-    echo "Launching setup inside tmux (session: $TMUX_SESSION)."
-    echo "If your connection drops, reconnect and run: tmux attach -t $TMUX_SESSION"
-    exec tmux new-session -s "$TMUX_SESSION" -- "$SCRIPT_PATH" "$@"
-  fi
-fi
- 
 [ "$EUID" -ne 0 ] || die "Run as your normal user, not root/sudo — the venv must be yours."
-[ -f "$PROJECT_DIR/requirements.txt" ] || die "Run from the project root (requirements.txt not found)."
+[ -f "$PROJECT_DIR/tools/requirements.txt" ] || die "tools/requirements.txt not found under $PROJECT_DIR — this script must stay in tools/, one level below the project root."
 sudo -v || die "This script needs sudo access."
  
 say "1/9  System update + build & runtime packages"
@@ -121,7 +103,7 @@ cd "$PROJECT_DIR"
 [ -d .venv ] || python3 -m venv .venv
 set +u; source .venv/bin/activate; set -u
 pip install --upgrade pip
-pip install -r requirements.txt
+pip install -r tools/requirements.txt
  
 say "7/9  Build the gphoto2 Python binding against /usr/local"
 PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
@@ -157,7 +139,7 @@ Group=$SERVICE_GROUP
 SupplementaryGroups=plugdev
 WorkingDirectory=$PROJECT_DIR
 Environment=LD_LIBRARY_PATH=/usr/local/lib
-ExecStart=$PROJECT_DIR/.venv/bin/python $PROJECT_DIR/run.py
+ExecStart=$PROJECT_DIR/.venv/bin/python $PROJECT_DIR/tools/run.py
 Restart=always
 RestartSec=3
 WatchdogSec=30

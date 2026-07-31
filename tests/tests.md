@@ -1,6 +1,6 @@
 # Testing
 
-Pathfinder's test suite: 295 tests, `unittest` only, no third-party test
+Pathfinder's test suite: 311 tests, `unittest` only, no third-party test
 dependencies, and **no camera required**. The whole camera layer runs against a
 fake libgphoto2, so the suite is a normal edit-run-edit loop on a laptop rather
 than something you can only do at the rig.
@@ -19,15 +19,19 @@ tests/
 ├── support.py            bootstrap: installs the fake gphoto2, fixes the cwd
 ├── fakes/
 │   ├── fake_gphoto2.py   the binding: constants, GPhoto2Error, CameraFilePath
-│   └── fake_camera.py    in-memory device, widget tree, and app-layer double
+│   ├── fake_camera.py    in-memory device, widget tree, and app-layer double
+│   └── dump.py           parses real gphoto2 dumps into FakeWidget trees
+├── fixtures/
+│   ├── fixtures.md       what the dumps are, and how to re-take one
+│   └── ilce_7m4.txt      captured off the real α7 IV (390 widgets)
 ├── test_sony_quirks.py     9   vendor/model quirk resolution
 ├── test_gp2_helpers.py    37   coercion, clamping, describe, disconnect codes
 ├── test_gp2_camera.py    113   Gphoto2Camera against a fake device
 ├── test_app_models.py     27   request validation + the bulb ceiling
 ├── test_app_routes.py     62   routes, error mapping, connection state machine
-├── test_web_contract.py    9   web/ ↔ app.py seams (static text checks)
+├── test_web_contract.py    9   web/ ↔ app/app.py seams (static text checks)
 ├── test_watchdog.py       23   sd_notify, the heartbeat, and the systemd unit
-├── test_fake_fidelity.py  13   does the double still resemble the real thing
+├── test_fake_fidelity.py  29   do the doubles still resemble the real thing
 └── test_known_gaps.py      2   TODO.md hazards, as expected-to-fail tests
 ```
 
@@ -40,30 +44,44 @@ python3 -m unittest discover -t . -s tests      # everything
 python3 -m unittest tests.test_gp2_camera -v    # one module
 python3 -m unittest tests.test_gp2_camera.Bulb  # one class
 python3 tests/run_tests.py -v                   # same, from any directory
+python3 tests/run_tests.py test_gp2_camera      # bare arg = filename glob
+python3 tests/run_tests.py -k Quirks            # -k = test name, any module
 ```
 
-`run_tests.py` exists only to remove a footgun: `app.py` mounts
+`run_tests.py` exists only to remove a footgun: `app/app.py` mounts
 `StaticFiles(directory="web")` at import time, so anything that imports it must
 run with the repo root as the working directory. The runner (and `support.py`)
 handles that for you.
+
+Two things about its arguments are worth knowing, because the obvious guess is
+wrong. A **bare argument is a filename glob**, not a test name — `run_tests.py
+Quirks` looks for `Quirks.py` and finds nothing. Use `-k` for names; it follows
+unittest's convention of matching anywhere in the dotted id, so `-k Quirks`
+catches both `EveryDumpedBodyMatchesItsQuirks` and `TheQuirksMatchTheHardware`.
+And **a run that matches nothing exits 2**, not 0. `wasSuccessful()` is `True`
+for an empty result, so a typo'd filter would otherwise print `NO TESTS RAN` and
+report success — which it did, until it was fixed.
 
 ### On the dev host vs. on the Pi
 
 The dev machine has no pip, no venv, and no `gphoto2`/`fastapi`, so **109 tests
 skip there** — everything that needs FastAPI or pydantic — plus the 5 that
-compare the fake against the real binding. The remaining 181 execute, including
+compare the fake against the real binding. The remaining 197 execute, including
 the entire camera layer:
 
 ```
-Ran 295 tests in 1.2s
+Ran 311 tests in 1.2s
 OK (skipped=114, expected failures=2)
 ```
+
+That count assumes a hardware dump is present in `fixtures/`. With none it is
+`skipped=128` and still green — see "The doubles" below.
 
 (The run used to take 0.2s. The extra second is `BusTimeout`, which waits out
 real lock deadlines — see below.)
 
-To run the whole suite, use the Pi's venv (created by `setup.sh`), which has the
-real dependencies:
+To run the whole suite, use the Pi's venv (created by `tools/setup.sh`), which
+has the real dependencies:
 
 ```bash
 cd ~/pathfinder && .venv/bin/python tests/run_tests.py
@@ -102,13 +120,37 @@ Three properties are deliberate:
 
 ## The doubles
 
-**`FakeWidget` / `default_config()`** — a config tree shaped like the α7 IV's.
-Section placement matters: `INCLUDE_SECTIONS` decides what `list_settings`
-exposes, `STATUS_SECTIONS` what `telemetry` does, and `actions` must be excluded
-from both while still being reachable by `get_child_by_name` (which searches the
-entire tree). The tree deliberately includes a read-only widget, a
-`GP_WIDGET_BUTTON`, a nested section, and a status widget that raises on
-`get_value` — each one exists to pin a filtering rule.
+**`FakeWidget` / `default_config()`** — a *synthetic* config tree, shaped like a
+camera but not copied from one. Section placement matters: `INCLUDE_SECTIONS`
+decides what `list_settings` exposes, `STATUS_SECTIONS` what `telemetry` does,
+and `actions` must be excluded from both while still being reachable by
+`get_child_by_name` (which searches the entire tree). The tree deliberately
+includes a read-only widget, a `GP_WIDGET_BUTTON`, a nested section, a `RANGE`
+setting, and a status widget that raises on `get_value` — each one exists to pin
+a filtering rule, and the real α7 IV has **none of them** (its settable sections
+are all `RADIO`/`MENU`). That is the point: this tree exercises widget *shapes*.
+
+**`dump.fixtures()`** — the opposite double: real trees parsed from the captured
+dumps in `fixtures/`, all 390 widgets for the α7 IV including the 347 raw PTP
+codes in `other`. Use it for any question of the form *"does this name/type/
+choice really exist on the body?"*
+
+Fixtures are **self-describing** — `dump.model_of()` reads the model out of each
+file's `Abilities for camera` header — so there is no registry and no loader per
+camera. Capture with `./tools/camera-dump.sh` on the Pi, commit, done:
+`EveryDumpedBodyMatchesItsQuirks` covers the new body on the next run, and a dump
+no vendor module claims is reported as a skip naming the model. An empty
+`fixtures/` is legitimate; the hardware-backed tests skip and the suite stays
+green.
+
+Keeping both is deliberate, and the split is **shapes vs. names**. A synthetic
+tree cannot answer whether `spotfocusarea` exists; a real dump cannot exercise a
+`BUTTON` this body never publishes. Getting that backwards is what caused the
+`changeafarea` bug — `default_config()` grew a widget because `camera/sony.py`
+named one, so the AF-point tests were comparing the quirk table to itself and
+passed for months against a feature that could not work. `test_fake_fidelity.py`
+now asserts every quirk widget name against the dump, which cannot agree with a
+name the hardware never had.
 
 **`FakeDevice`** — what `gp.Camera()` returns, i.e. the object `Gphoto2Camera`
 wraps. It reproduces libgphoto2's *snapshot* config model: `get_config()` returns
@@ -117,11 +159,11 @@ until `set_config()` pushes it back. That distinction is load-bearing —
 "`_ensure_focus_mode` leaves an acceptable mode alone" is only a meaningful
 assertion if a forgotten `set_config` would be observable.
 
-**`FakeConnectedCamera`** — the app-layer double. `app.py` never sees a
+**`FakeConnectedCamera`** — the app-layer double. `app/app.py` never sees a
 `FakeDevice`; it holds whatever `camera.connect()` returned and only calls
 `Gphoto2Camera`'s public surface. That surface is an undeclared duck-typed
 interface, so `test_fake_fidelity.py` pins both ends of it: the real camera must
-answer every call `app.py` makes, and so must the double.
+answer every call `app/app.py` makes, and so must the double.
 
 Failure injection, which is most of what the tests are built on:
 
@@ -218,7 +260,7 @@ outage it exists for. `test_the_probe_rides_the_same_pool_the_camera_operations_
 shrinks anyio's real thread limiter to one token and has a blocking call hold it,
 so the claim "the probe is a genuine round trip through the camera pool" is
 tested rather than asserted. `SystemdUnit` reads the unit heredoc out of
-`setup.sh` as text — the same trick `test_web_contract.py` uses — because a
+`tools/setup.sh` as text — the same trick `test_web_contract.py` uses — because a
 heartbeat is worthless if the unit never arms `WatchdogSec` or opens
 `NotifyAccess`, and neither file can see the other.
 
@@ -275,6 +317,45 @@ unrenderable widget is not — including that a refused write reaches no widget 
 all, since `POST /api/settings/bulb` used to fire the shutter through an endpoint
 meant to be inert.
 
+**Every widget name a quirk table uses exists on the real body.**
+`EveryDumpedBodyMatchesItsQuirks` resolves each dump in `fixtures/` through
+`gp2._quirks_for` and asserts that every widget the resulting table names is
+present in that body's tree. This is the test whose absence let
+`af_area_widget: "changeafarea"` — a Canon EOS name — sit in `sony.py` for
+months: a wrong name is invisible until it reaches hardware, where it surfaces as
+`[-2] Bad parameters` from `get_single_config`, and the hand-written fake
+published a `changeafarea` widget *because the quirk table asked for one*. The
+AF-point tests were comparing the quirk table against itself. Nothing in the
+class is hardcoded to a body, so a new dump is covered on the next run.
+
+**Strict about names the code writes, loose about names it reads.** The two
+focus-mode assertions look inconsistent and are not. `af_target_mode` /
+`mf_target_mode` are *written* by `_ensure_focus_mode`, so a value the body
+doesn't offer is a guaranteed failure the moment focus is used — those must be
+real choices. `af_modes` / `mf_modes` are a tolerance list, read only to decide
+whether the current mode is already acceptable, and they live in the shared
+`GENERAL` table, so they may legitimately name modes other Sony bodies have. The
+α7 IV has no `AF-S`, and that is fine. Only a list that misses this body
+*entirely* is a bug, because then every focus call would rewrite a mode that was
+already correct — so the assertion is a non-empty intersection, not a subset.
+
+**A body no vendor module claims is reported, not failed.** Such a dump falls
+through to `DEFAULT_QUIRKS`, whose generic PTP names mostly don't exist on real
+hardware, so asserting against it would be noise.
+`test_unclaimed_bodies_are_reported` skips with the model name instead — that is
+the starting point for adding a camera, not a defect. `vendor_matched()` is what
+keeps the two cases apart.
+
+**The fixture directory itself is checked.** `TheFixtureDirectoryIsWellFormed`
+runs even with no dumps present, since an empty directory is well-formed. Two
+hazards: re-capturing under a different name leaves *two* files for one body
+(harmless but confusing — the quirk checks run twice and `fixture_for` answers
+with whichever sorted first), and a truncated or failed capture would otherwise
+vanish silently, because `fixtures()` skips files with no `Abilities for camera`
+header so stray notes don't break the suite. The cost of that tolerance is that a
+broken dump looks like an *absent* one, so unparseable `.txt` files are named
+explicitly rather than ignored.
+
 ## Known gaps
 
 `test_known_gaps.py` holds one test per open hazard from `TODO.md`, each
@@ -329,7 +410,7 @@ risk sits.
   the suite pins what happens to the callers queued behind a wedge, not what
   happens to the wedged call itself (nothing: it keeps its worker until the
   process restarts).
-- **Deployment.** `setup.sh` as a whole, the AP configuration and the libgphoto2
+- **Deployment.** `tools/setup.sh` as a whole, the AP configuration and the libgphoto2
   build are untested; `SystemdUnit` in `test_watchdog.py` reads four directives
   out of the unit heredoc as text, which is a contract check, not an install test.
   Whether systemd actually aborts and restarts a stopped process is a
@@ -375,7 +456,7 @@ scans `camera/gp2.py` for the calls it makes and fails if the double is missing
 one, so this is enforced rather than remembered.
 
 **Two things worth knowing before writing an async test:** the module-level
-`asyncio.Lock` in `app.py` binds itself to the first loop that acquires it, and
+`asyncio.Lock` in `app/app.py` binds itself to the first loop that acquires it, and
 `asyncio.run()` builds a fresh loop per test — so `RouteTestCase.setUp` replaces
 it. And route functions are called directly, which means request bodies are
 constructed as pydantic models by hand rather than posted as JSON.

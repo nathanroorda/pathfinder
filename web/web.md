@@ -1,6 +1,6 @@
 # Frontend
 
-`web/` is the entire client: a single static page served by `app.py`'s
+`web/` is the entire client: a single static page served by `app/app.py`'s
 `StaticFiles` mount. There is no build step, no framework, and no dependencies —
 just hand-written HTML, CSS, and vanilla JS that the Pi serves as-is. It's built
 for one usage pattern: a phone joined to the Pi's own WiFi AP, pointed at
@@ -9,7 +9,7 @@ for one usage pattern: a phone joined to the Pi's own WiFi AP, pointed at
 The frontend holds **no camera-specific knowledge**. It renders whatever the
 backend reports and posts changes back; the settings panel is built entirely from
 the widget descriptors the API returns, so plugging in a different camera rebuilds
-the UI with no code change. The API surface it consumes is defined in **`app.md`**
+the UI with no code change. The API surface it consumes is defined in **`app/app.md`**
 (the HTTP table) and the descriptor shape it renders comes from `gp2._describe`,
 documented in **`camera.md`**.
 
@@ -45,7 +45,7 @@ async function api(url, opts) { ... }   // fetch → throw on !ok → return par
 
 On a non-2xx response it throws an `Error` carrying the backend's `detail` field
 (FastAPI's `HTTPException` body) when present, falling back to the HTTP status
-text. That means the 503/400/404/409 responses described in **`app.md`** surface to
+text. That means the 503/400/404/409 responses described in **`app/app.md`** surface to
 the user as readable messages rather than silent failures — callers just
 `try/catch` and drop `e.message` into `#result`.
 
@@ -64,7 +64,7 @@ the user as readable messages rather than silent failures — callers just
   the status offline.
 
 This poll is the entire "liveness" mechanism: because `/api/status` never touches
-hardware (see **`app.md`**), it's cheap to hit every 5s, and it's what makes the
+hardware (see **`app/app.md`**), it's cheap to hit every 5s, and it's what makes the
 UI recover on its own after the backend self-heals a dropped USB connection.
 
 ### Telemetry strip
@@ -98,7 +98,7 @@ mid-recording to avoid extra PTP traffic on the bus while the movie is rolling
 (see **`camera.md`**), so the client doesn't request frames it would only get
 errors for. It is off during a bulb for a related but distinct reason — there the
 backend would *accept* the request, but the exposure holds the camera lock for
-its full duration, so every frame would just be a 409 (see **`app.md`**). A stream error (camera
+its full duration, so every frame would just be a 409 (see **`app/app.md`**). A stream error (camera
 hiccup, or the server generator ending when the camera drops) fires the `<img>`
 `error` handler, which clears `src`; the next status poll re-opens it if the
 camera is still connected — the same self-healing pattern the settings panel and
@@ -128,7 +128,7 @@ just a nicer front door.)
 > with *nothing in the server log*, since the request never leaves the browser
 > (`net::ERR_BLOCKED_BY_CLIENT`). Capture is unaffected. If you rename these
 > routes, avoid `record`/`track`/`analytics`-style tokens, and update both
-> `app.py` and the fetch URLs here.
+> `app/app.py` and the fetch URLs here.
 
 ### Focus controls
 

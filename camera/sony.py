@@ -5,12 +5,13 @@ GENERAL = {
     "af_widget": "autofocus",
     "af_drive_values": (1, 0),
     "manual_focus_widget": "manualfocus",
-    "focus_mode_widget": "focusmode","af_modes": ("Automatic", "AF-A", "AF-C", "AF-S", "DMF"),
+    "focus_mode_widget": "focusmode",
+    "af_modes": ("Automatic", "AF-A", "AF-C", "AF-S", "DMF"),
     "af_target_mode": "AF-A",
     "mf_modes": ("Manual",),
     "mf_target_mode": "Manual",
     "bulb_widget": "bulb",
-    "af_area_widget": "changeafarea",
+    "af_area_widget": "spotfocusarea",
     "af_area_size": (640, 480),
 }
 

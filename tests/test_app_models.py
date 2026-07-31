@@ -6,7 +6,7 @@ from unittest import mock
 from tests import support
 
 if support.have("pydantic") and support.have("fastapi"):
-    import app as app_module
+    import app.app as app_module
     from pydantic import ValidationError
 
 
