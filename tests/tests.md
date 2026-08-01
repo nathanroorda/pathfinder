@@ -1,6 +1,6 @@
 # Testing
 
-Pathfinder's test suite: 311 tests, `unittest` only, no third-party test
+Pathfinder's test suite: 339 tests, `unittest` only, no third-party test
 dependencies, and **no camera required**. The whole camera layer runs against a
 fake libgphoto2, so the suite is a normal edit-run-edit loop on a laptop rather
 than something you can only do at the rig.
@@ -24,14 +24,16 @@ tests/
 ├── fixtures/
 │   ├── fixtures.md       what the dumps are, and how to re-take one
 │   └── ilce_7m4.txt      captured off the real α7 IV (390 widgets)
+                          (see also ../tools/hardware-check.py — assertions
+                           that need a body, not a fake)
 ├── test_sony_quirks.py     9   vendor/model quirk resolution
 ├── test_gp2_helpers.py    37   coercion, clamping, describe, disconnect codes
-├── test_gp2_camera.py    113   Gphoto2Camera against a fake device
-├── test_app_models.py     27   request validation + the bulb ceiling
-├── test_app_routes.py     62   routes, error mapping, connection state machine
-├── test_web_contract.py    9   web/ ↔ app/app.py seams (static text checks)
+├── test_gp2_camera.py    127   Gphoto2Camera against a fake device
+├── test_app_models.py     31   request validation + the bulb ceiling
+├── test_app_routes.py     67   routes, error mapping, connection state machine
+├── test_web_contract.py   12   web/ ↔ app/app.py seams (static text checks)
 ├── test_watchdog.py       23   sd_notify, the heartbeat, and the systemd unit
-├── test_fake_fidelity.py  29   do the doubles still resemble the real thing
+├── test_fake_fidelity.py  31   do the doubles still resemble the real thing
 └── test_known_gaps.py      2   TODO.md hazards, as expected-to-fail tests
 ```
 
@@ -64,18 +66,18 @@ report success — which it did, until it was fixed.
 
 ### On the dev host vs. on the Pi
 
-The dev machine has no pip, no venv, and no `gphoto2`/`fastapi`, so **109 tests
+The dev machine has no pip, no venv, and no `gphoto2`/`fastapi`, so **118 tests
 skip there** — everything that needs FastAPI or pydantic — plus the 5 that
-compare the fake against the real binding. The remaining 197 execute, including
+compare the fake against the real binding. The remaining 216 execute, including
 the entire camera layer:
 
 ```
-Ran 311 tests in 1.2s
-OK (skipped=114, expected failures=2)
+Ran 339 tests in 1.3s
+OK (skipped=123, expected failures=2)
 ```
 
 That count assumes a hardware dump is present in `fixtures/`. With none it is
-`skipped=128` and still green — see "The doubles" below.
+`skipped=139` and still green — see "The doubles" below.
 
 (The run used to take 0.2s. The extra second is `BusTimeout`, which waits out
 real lock deadlines — see below.)
@@ -273,6 +275,60 @@ the clamp is the only bound, since `AfPoint` accepts any float (a NaN, which
 Python's JSON parser will happily accept, collapses to 0 rather than reaching the
 body).
 
+**A level the body doesn't offer never reaches USB.** The focus magnifier is the
+first action whose valid values are *enumerated by the body* rather than fixed by
+the quirk table, so `set_magnifier` validates against the widget's own choices
+before writing. Tests pin that an unknown level raises `ValueError` with **no**
+`set_single_config` call at all — the same shape as the settings-allowlist round
+trip, and for the same reason: the alternative is a `[-2] Bad parameters` from
+hardware with no way to tell a typo from a dead bus. The read side is pinned
+symmetrically: `levels` comes off the widget, not a constant. `Off` is asserted
+to go through `_release_action` (a punched-in body you can't un-punch is the same
+class of stranding as a latched shutter) while entering magnification is asserted
+*not* to retry — there is nothing to unwind, so the error should surface on the
+first attempt.
+
+**The body appends more than it was asked for.** `focusmagnifier` reads back as
+`Off,332,249` — level plus the magnifier box's position. A test pins that
+`_magnifier_level` strips it, because `value` has to be comparable against
+`levels` for the UI to preselect the right option; comparing the raw string would
+silently select nothing and the control would look reset after every read.
+
+**A read-back is only as fresh as the path it took.** This was a real field bug,
+caught on the rig: the magnifier select displayed every change one selection
+behind, because `_read_magnifier` used `get_single_config`, which on Sony serves
+a cached property store that a write does not invalidate. The fix is to read
+through the whole tree, and `test_the_read_back_goes_through_the_whole_tree_not_single_config`
+asserts the *path* — no `get_single_config` after the write — rather than the
+value. That is deliberate: no in-process fake can reproduce libgphoto2's cache,
+so a value assertion would pass against a fake and fail on the body, exactly the
+`changeafarea` trap again. Pinning the call the code makes is the most a unit
+test can honestly claim here, and it is enough to stop "switch to the cheaper
+single-widget read" from silently reintroducing the bug.
+
+**How many round trips an operation costs is a testable property.** A whole-tree
+`get_config()` costs ~416 ms on the α7 IV and holds the bus, so the difference
+between one and two of them per magnifier change is the difference between one
+and two dozen dropped liveview frames.
+`test_a_settled_change_costs_exactly_one_tree_read` counts `get_config` calls,
+which is the sort of thing normally left to a profiler and a code review — but
+the second read here was invisible (a validation step that looked like a plain
+lookup), and it doubled the cost of every change until it was measured on the
+rig. Counting calls against the fake is free and catches its return.
+
+**The retry that read count nearly cost us.** Removing that validating read also
+removed the settle retry, on the measurement that the retry never fired — a
+measurement the removal itself invalidated, since the validating read was what
+had been giving the body time to apply the write. The rig came back reading one
+level stale on two of three transitions. So the retry is now pinned three ways
+against the fake's `lagging_read_back(reads)` hook: a lagging body is **retried**
+and reports the level asked for; a body that never reflects the write reports
+**what the body says** with a `WARNING` after exactly
+`MAGNIFIER_SETTLE_ATTEMPTS` reads; and the retries hold the bus throughout and
+sleep a bounded number of times. The `assertEqual(self.clock.sleeps, [])` in the
+settled case is the one that matters most — it is what would catch the retry
+silently becoming the common path.
+
 **Values are clamped to the widget's own range.** `_coerce` takes the widget, not
 just its type, and holds a RANGE value inside the `get_range()` bounds the body
 advertises — the only bounds that know where the hardware stops. That one place
@@ -416,6 +472,65 @@ risk sits.
   Whether systemd actually aborts and restarts a stopped process is a
   `kill -STOP` on the Pi (`TODO.md` #8).
 
+### `tools/hardware-check.py` — the checks a fake structurally cannot make
+
+Some claims are only decidable against a body, and the magnifier bug is the
+canonical one: the fake happily returns whatever it was told, so *every* unit
+test passed while the feature was one selection stale on real hardware. No amount
+of care in `fakes/` fixes that — a fake that reproduced libgphoto2's property
+cache would be reproducing a bug we only learned about *from* the hardware.
+
+`tools/hardware-check.py` is the answer to "how would we have caught this": a
+scripted, assertive version of the manual list below, run on the Pi against a
+real camera.
+
+```bash
+sudo systemctl stop pathfinder      # it holds the USB claim
+cd ~/pathfinder && .venv/bin/python tools/hardware-check.py; echo $?
+sudo systemctl start pathfinder
+```
+
+It prints one line per claim, exits non-zero on any failure, and **fires no
+shutter** — so it is safe to run casually, which is the whole point of writing it
+down instead of leaving it in a checklist. Each check restores the body's state
+in a `finally`, so a failure part-way through does not leave the magnifier
+punched in.
+
+Two checks live there today. `check_magnifier` walks every level the body
+advertises, asserting each is reported back and survives an independent re-read,
+and times a change against the cost of one bare tree read.
+`check_read_paths` writes a level and then reads it through **both**
+`get_single_config` and `get_config` — the comparison the unit suite genuinely
+cannot express, since `test_gp2_camera.py` can pin which call the code *makes*
+but not which call tells the truth.
+
+**Its ordering is the entire experiment, and the first version got it wrong.**
+That version drove the write with `cam.set_magnifier()`, which ends in a
+`get_config()` — so a tree read had already refreshed the property store before
+the single-widget read was sampled, and the check reported a clean pass against a
+body that was demonstrably stale. It refreshed the state it existed to measure.
+The check now writes with `_drive_action` and samples both paths inside **one bus
+hold with no `get_config()` in between**. If you extend it, that constraint is
+the thing to preserve.
+
+It also splits assertions from measurements, which matters here because "the
+single read is stale" is a *finding about this driver*, not a defect in our code
+— reporting it as `FAIL` would make a red run the correct outcome and train
+people to ignore the exit code. So the freshness of the tree read is an
+assertion, while the agreement between the two paths is a `note` that never moves
+the exit code. That also makes it a discovery tool: run it on a new body and the
+note says immediately whether that vendor's driver behaves the same way.
+
+On the α7 IV (firmware 4.00, 2026-07-31) the corrected check reports
+`single='Off' tree='1'` — two reads of the same property microseconds apart,
+disagreeing. That single line is what turned TODO #48 from a plausible story
+into a measured fact, and it is the whole argument for the tool existing.
+
+It reaches past the camera layer's public surface (`cam._cam`, `cam._quirks`) on
+purpose: it is a diagnostic comparing two libgphoto2 paths, which is exactly the
+distinction `camera/` exists to hide from everything else. That is the reason it
+is a tool and not a test.
+
 ### Manual checks the suite can't replace
 
 After changing anything in `camera/`, on the rig:
@@ -426,6 +541,10 @@ After changing anything in `camera/`, on the rig:
 3. Start and stop a recording; confirm the body actually leaves record mode.
 4. AF, then a manual focus nudge in both directions; confirm the lens moves and
    `focusmode` ends where you expect.
+4b. Punch the magnifier to `5.5×`, nudge focus, then set it back to `Off`.
+   `tools/hardware-check.py` now covers the API round trip, so what is left here
+   is the part no script can see: that the preview **visibly crops**, and that
+   `Off` un-crops it.
 5. A short bulb exposure; confirm the shutter closes and the frame downloads.
 6. Unplug the camera mid-session; confirm the UI goes to "No camera connected"
    and recovers on replug without restarting the service.

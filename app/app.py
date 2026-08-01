@@ -56,6 +56,10 @@ class AfPoint(BaseModel):
     y: float
 
 
+class Magnification(BaseModel):
+    level: str
+
+
 def _try_connect(app: FastAPI) -> None:
     try:
         app.state.camera = camera.connect()
@@ -360,6 +364,24 @@ async def af_point(body: AfPoint):
         log.warning("set_af_point(%s, %s) failed: %r", body.x, body.y, exc, exc_info=True)
         raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True}
+
+
+@app.get("/api/magnifier")
+async def magnifier():
+    cam = _require_camera()
+    return await _run_camera(cam.magnifier)
+
+
+@app.post("/api/magnifier")
+async def set_magnifier(body: Magnification):
+    cam = _require_camera()
+    try:
+        return await _run_camera(cam.set_magnifier, body.level)
+    except HTTPException:
+        raise  # disconnect (503)
+    except Exception as exc:
+        log.warning("set_magnifier(%r) failed: %r", body.level, exc, exc_info=True)
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.get("/api/telemetry")

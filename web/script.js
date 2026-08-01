@@ -10,6 +10,7 @@ const afBtn = document.getElementById("af");
 const focusNearBtn = document.getElementById("focusNear");
 const focusFarBtn = document.getElementById("focusFar");
 const focusStepEl = document.getElementById("focusStep");
+const magnifierEl = document.getElementById("magnifier");
 const bulbBtn = document.getElementById("bulbBtn");
 const bulbSecondsEl = document.getElementById("bulbSeconds");
 const afMarker = document.getElementById("afMarker");
@@ -64,8 +65,8 @@ async function refreshStatus() {
     statusEl.textContent = s.connected ? `Connected: ${s.model}` : "No camera connected";
     statusEl.className = "status " + (s.connected ? "connected" : "offline");
     connected = s.connected;
-    if (s.connected && !wasConnected) { loadSettings(); loadTelemetry(); }
-    if (!s.connected) telemetryEl.replaceChildren();
+    if (s.connected && !wasConnected) { loadSettings(); loadTelemetry(); loadMagnifier(); }
+    if (!s.connected) { telemetryEl.replaceChildren(); magnifierEl.hidden = true; }
     setRecording(s.connected && s.recording);  // also reconciles the liveview
     wasConnected = s.connected;
   } catch {
@@ -73,6 +74,7 @@ async function refreshStatus() {
     statusEl.className = "status offline";
     connected = false;
     telemetryEl.replaceChildren();
+    magnifierEl.hidden = true;
     updateLiveview();
   }
 }
@@ -165,6 +167,43 @@ async function driveFocus(steps) {
 
 focusNearBtn.addEventListener("click", () => driveFocus(-Number(focusStepEl.value)));
 focusFarBtn.addEventListener("click", () => driveFocus(+Number(focusStepEl.value)));
+
+function magnifierLabel(level) {
+  return Number(level) > 0 ? `${level}×` : level;
+}
+
+function renderMagnifier(state) {
+  magnifierEl.hidden = !state.supported;
+  if (!state.supported) return;
+  magnifierEl.replaceChildren();
+  for (const level of state.levels) {
+    magnifierEl.add(new Option(magnifierLabel(level), level, false, level === state.value));
+  }
+}
+
+async function loadMagnifier() {
+  try {
+    renderMagnifier(await api("/api/magnifier"));
+  } catch {
+    magnifierEl.hidden = true;
+  }
+}
+
+magnifierEl.addEventListener("change", async () => {
+  const level = magnifierEl.value;
+  resultEl.textContent = "Magnifying…";
+  try {
+    renderMagnifier(await api("/api/magnifier", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ level }),
+    }));
+    resultEl.textContent = `Magnifier ${magnifierLabel(level)} ✓`;
+  } catch (e) {
+    resultEl.textContent = `Error: ${e.message}`;
+    loadMagnifier();  // the select is showing a level the body never took
+  }
+});
 
 bulbBtn.addEventListener("click", async () => {
   const seconds = Number(bulbSecondsEl.value);

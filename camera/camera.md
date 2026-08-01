@@ -50,8 +50,8 @@ design points drive everything else in the class:
 
 **1. One lock guards every hardware op, and waiting on it is bounded.** `_lock`
 (a `threading.Lock`) wraps the body of `capture`, `bulb`, `preview`,
-`set_recording`, `autofocus`, `manual_focus`, `set_af_point`, `list_settings`,
-`set_setting`, `telemetry`, and `close`.
+`set_recording`, `autofocus`, `manual_focus`, `set_af_point`, `magnifier`,
+`set_magnifier`, `list_settings`, `set_setting`, `telemetry`, and `close`.
 This matters because `app/app.py` runs these on threadpool workers — without the
 lock, a capture and a settings write could execute inside libgphoto2
 concurrently, which the binding doesn't tolerate. `_require_open()` (called at the
@@ -259,6 +259,14 @@ cost. Re-reading the widget per call also means each write starts from its live
 value, so it's a real edge that re-fires the momentary action rather than a no-op
 — the software analog of edge-triggering a shutter line.
 
+> **The choice is only free for *writes*.** For a **read-back after a write** the
+> two paths are not equivalent on Sony: `get_single_config` serves a cached
+> property store that the write does not invalidate, so it hands back the
+> previous value. That cost a real bug in the focus magnifier — see
+> `set_magnifier` below. Every action here is momentary and nothing reads its
+> value back, so they are unaffected; but if you add an action that *reports*
+> state, read it through `get_config()`.
+
 > **History (so the `-2` ghost doesn't come back):** a long bug hunt blamed the
 > `single-config`↔`full-tree` distinction — the theory was that action widgets
 > *needed* single-config and `focusmode` *needed* the tree. That was wrong. The
@@ -302,6 +310,144 @@ so `_coerce` passes it through untouched. Refused with `RuntimeError` (→ 400) 
 > the body ignores or rejects the write. The `focusarea` widget on this body does
 > offer `Flexible Spot: S/M/L`, so managing that mode automatically (à la
 > `_ensure_focus_mode`) is a natural follow-up if it proves fiddly in practice.
+
+### `magnifier()` / `set_magnifier(level)`
+
+**Focus magnification** — the punch-in the body applies to its liveview output so
+you can judge critical focus. It is the natural companion to `manual_focus`,
+because that command is a *relative* nudge with no position feedback: on the
+α7 IV both `focalposition` and `zoom` are read-only (confirmed in the dump), so
+there is no way to ask the body where the lens is. The only way to tell whether a
+nudge landed is to look at a magnified frame — which is why this pairs with the
+focus buttons rather than living in the settings panel.
+
+Unlike every other action widget, this one is **stateful and enumerable** rather
+than momentary: `focusmagnifier` is a `RADIO` whose choices *are* the
+magnifications the body offers (`Off`, `1`, `5.5`, `11` on the α7 IV). So it gets
+a read side as well as a write side:
+
+- **`magnifier()`** returns `{supported, levels, value}` — `levels` read straight
+  off the widget's choices, so the level list is the body's, not a hardcoded one.
+  A body with no `magnifier_widget` quirk answers
+  `{"supported": False, "levels": [], "value": None}` rather than raising, so the
+  frontend can ask unconditionally and just hide the control.
+- **`set_magnifier(level)`** validates `level` against those same choices and
+  raises `ValueError` (→ 400) if it isn't one — the check is deliberately
+  **before** the write, so a bad level never reaches USB as a `[-2]`. It then
+  reads back and returns the same descriptor.
+
+**The read-back carries more than the level.** The dump shows
+`Current: Off,332,249` — the body appends the magnifier box's position to the
+level, the same `x,y` shape `spotfocusarea` uses. `_magnifier_level()` splits on
+the first comma so `value` is comparable against `levels`; the position is
+discarded, since nothing here positions the box.
+
+**Turning it off goes through `_release_action`, turning it on does not.** Off is
+the value that strands hardware if the write is lost: the body stays punched in,
+every liveview frame stays cropped, and you cannot compose a shot. That is the
+same class of failure as a latched shutter or a latched AF toggle, so it gets the
+same retry-and-shout treatment. Failing to *enter* magnification, by contrast,
+leaves the body exactly where it was — nothing to unwind, so a single attempt and
+a propagated error is the right cost.
+
+Not gated on `self.recording`, for the same reason the focus actions aren't:
+it is a plain config write, and punching in to check focus mid-take is a real use
+case.
+
+**The read-back must go through the whole tree, and this is the one place in the
+class where that is a correctness requirement rather than a cost.** Everywhere
+else, `get_single_config` versus `get_config` is the efficiency choice described
+under `_drive_action`. Here it decides whether the value is *true*.
+
+`_read_magnifier` originally used `get_single_config`, and the control displayed
+every change one selection behind: pick `1×`, the response says `Off`; pick `11×`,
+the response says `1×`. The cause is that on Sony, `get_single_config` serves a
+**cached property store that a write does not invalidate** — so the level it
+returns is whatever the cache held when it was last filled, not what the body
+holds now. The cache does get refreshed, just not by us: `telemetry()` polls
+`get_config()` every 15s and the settings panel calls `list_settings()`, and a
+tree read is what re-reads the property store from the body. That is why the
+staleness looked like a clean one-step pipeline rather than random drift.
+
+The tell is worth remembering: **a control that corrects itself on the next
+interaction is reporting a stale read, not a failed write.** A rejected write
+raises; it does not silently show you the previous value.
+
+**This is measured, not inferred.** `tools/hardware-check.py::check_read_paths`
+writes a level and then samples *both* read paths inside one bus hold, with no
+tree read in between. On an α7 IV (firmware 4.00, 2026-07-31) it reports:
+
+```
+note  a single-widget read sees a write the tree read sees
+      — no: single='Off' tree='1'
+```
+
+Two reads of the same property, microseconds apart, disagreeing about what the
+body holds. That is the bug in one line, and it is why `test_gp2_camera.py` pins
+the read *path* rather than the value: no fake can reproduce this, so the unit
+suite's only honest claim is which call the code makes. "Switch to the cheaper
+single-config read" is an obvious-looking optimisation that would silently
+reintroduce it.
+
+**The read-back is retried, and the story of why is worth keeping.** It exists to
+catch the body ACKing a property write it then ignores (wrong focus mode, movie
+rolling, a lens that doesn't support it). But the body can also simply be *slow*:
+a `get_config()` issued immediately after the write catches it mid-apply and
+returns the previous level. `_settled_magnifier(level)` therefore re-reads up to
+`MAGNIFIER_SETTLE_ATTEMPTS` (3) times with a `MAGNIFIER_SETTLE_DELAY` (0.1s)
+between tries — the same attempts-plus-backoff shape as `_release_action`. If it
+still disagrees, `set_magnifier` **returns what the body says** and logs at
+`WARNING` naming both values, so the UI snaps back to reality rather than
+reporting work the body didn't do. Compare the bulb mode note above, where doing
+that silently is filed as a defect (#38).
+
+> **This loop was deleted once, on a measurement that the deletion invalidated.**
+> The evidence for removing it was solid: across every level, the poll never
+> iterated. But that was measured while `set_magnifier` still did a whole-tree
+> read *before* the write, to validate the level. Removing that read — the other
+> half of the same change — is exactly what changed the timing the poll's
+> necessity had been measured under. The next hardware run came back with two of
+> three real transitions reading one level stale. The two edits were coupled and
+> were treated as independent. If you tune this path, re-run
+> `tools/hardware-check.py` **after** each change, not once before both.
+
+**Cost: one tree read per settled change.**
+
+| | before | after |
+|---|---|---|
+| validate the level against the widget's choices | tree read (410 ms) | `get_single_config` (~ms) |
+| read back the result | tree read (410 ms) | tree read (410 ms), retried if stale |
+| **total bus held** | **807 ms, every change** | **295 ms settled, 868 ms when a retry fires** |
+
+Measured on the α7 IV 2026-07-31: **2 of 4 level changes needed the retry**, so
+the lag is routine on this body rather than exceptional — which is the strongest
+argument for #49's redesign, since a write that does no dedicated read at all
+avoids both the read and the retry. Note the worst case (868 ms) is marginally
+*above* the 807 ms it replaced; what improved is the typical change, not the
+ceiling.
+
+Validation moved to `get_single_config` because the staleness measured above
+affects a widget's **value**, not its **choice list** — the two paths publish
+identical enumerations, which `tools/hardware-check.py` asserts rather than
+assumes, since the whole read path now depends on it.
+
+The remaining 406 ms is the read-back, and no amount of local tuning removes it:
+a `get_config()` is the only fresh read this driver offers. It still exceeds
+`PREVIEW_BUS_TIMEOUT` (0.25 s), so liveview drops roughly a dozen frames per
+change. Getting to zero means not doing a dedicated read at all — writing
+optimistically and reconciling on a shared periodic config snapshot that
+`telemetry()` and `list_settings()` would share too. That is **TODO #49**, and it
+subsumes #19.
+
+All of it runs under the caller's `_bus` lock, well inside `BUS_TIMEOUT` (2.0s),
+so a concurrent capture or settings write simply waits; only liveview, with its
+much shorter deadline, is refused and resumes on its own.
+
+> **Verified on hardware 2026-07-31** (α7 IV, firmware 4.00). The open question
+> was whether the driver's *put* accepts the bare choice label (`"5.5"`) or wants
+> the full `level,x,y` triple its *get* returns — `spotfocusarea` being precedent
+> for Sony action widgets carrying coordinates. It takes the bare label:
+> `tools/hardware-check.py` sets all four levels and reads each one back.
 
 ### `preview()`
 
@@ -448,6 +594,8 @@ The quirk keys:
 | `bulb_widget` | config name of the bulb-release action (`None` = unsupported) | `"bulb"` | `None` |
 | `af_area_widget` | config name of the AF-area/point action (`None` = unsupported) | `"spotfocusarea"` | `None` |
 | `af_area_size` | native AF-grid size `(w, h)` the normalized tap is scaled onto | `(640, 480)` | `(0, 0)` |
+| `magnifier_widget` | config name of the focus-magnifier action (`None` = unsupported) | `"focusmagnifier"` | `None` |
+| `magnifier_off` | the widget choice that means "not magnified" — released, not driven | `"Off"` | `None` |
 
 `gp2._quirks_for(model)` walks each module in `VENDORS = [sony]` in order, taking
 the first non-`None` result, and falls back to `DEFAULT_QUIRKS` for anything

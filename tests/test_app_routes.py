@@ -84,7 +84,7 @@ class NoCameraConnected(RouteTestCase):
 
     def test_routes_that_take_no_body(self):
         for name in ("capture", "record_start", "record_stop", "autofocus",
-                     "telemetry", "get_settings"):
+                     "magnifier", "telemetry", "get_settings"):
             with self.subTest(route=name):
                 exc = self.assertHTTPStatus(503, getattr(app_module, name))
                 self.assertIn("no camera", exc.detail)
@@ -93,7 +93,8 @@ class NoCameraConnected(RouteTestCase):
         for route, body in [
                 (app_module.bulb, app_module.BulbExposure(seconds=1)),
                 (app_module.manual_focus, app_module.FocusStep(steps=1)),
-                (app_module.af_point, app_module.AfPoint(x=0.5, y=0.5))]:
+                (app_module.af_point, app_module.AfPoint(x=0.5, y=0.5)),
+                (app_module.set_magnifier, app_module.Magnification(level="Off"))]:
             with self.subTest(route=route.__name__):
                 self.assertHTTPStatus(503, route, body)
 
@@ -154,6 +155,9 @@ class DisconnectHandling(RouteTestCase):
              (app_module.FocusStep(steps=1),)),
             ("set_af_point", app_module.af_point,
              (app_module.AfPoint(x=0.5, y=0.5),)),
+            ("magnifier", app_module.magnifier, ()),
+            ("set_magnifier", app_module.set_magnifier,
+             (app_module.Magnification(level="Off"),)),
             ("telemetry", app_module.telemetry, ()),
             ("list_settings", app_module.get_settings, ()),
         ]
@@ -207,6 +211,9 @@ class BusyHandling(RouteTestCase):
              (app_module.FocusStep(steps=1),)),
             ("set_af_point", app_module.af_point,
              (app_module.AfPoint(x=0.5, y=0.5),)),
+            ("magnifier", app_module.magnifier, ()),
+            ("set_magnifier", app_module.set_magnifier,
+             (app_module.Magnification(level="Off"),)),
             ("telemetry", app_module.telemetry, ()),
             ("list_settings", app_module.get_settings, ()),
         ]
@@ -300,6 +307,41 @@ class Focus(RouteTestCase):
                 self.setUp()
                 self.cam.errors[method] = gp.GPhoto2Error(gp.GP_ERROR_BAD_PARAMETERS)
                 self.assertHTTPStatus(400, route, *args)
+
+
+class Magnifier(RouteTestCase):
+    def test_get_returns_the_camera_state_verbatim(self):
+        self.assertEqual(run(app_module.magnifier()), self.cam.magnifier())
+
+    def test_set_passes_the_level_through_and_returns_the_new_state(self):
+        result = run(app_module.set_magnifier(app_module.Magnification(level="5.5")))
+
+        self.assertEqual(result["value"], "5.5")
+        self.assertEqual(self.cam.called("set_magnifier"),
+                         [("set_magnifier", "5.5")])
+
+    def test_a_level_the_body_rejects_is_a_client_error(self):
+        self.cam.errors["set_magnifier"] = ValueError(
+            "'2.5' is not a magnification this body offers (Off, 1, 5.5, 11)")
+
+        exc = self.assertHTTPStatus(400, app_module.set_magnifier,
+                                    app_module.Magnification(level="2.5"))
+
+        self.assertIn("not a magnification", exc.detail)
+
+    def test_unsupported_body_is_a_client_error(self):
+        self.cam.errors["set_magnifier"] = RuntimeError(
+            "focus magnification is not supported on this body")
+        self.assertHTTPStatus(400, app_module.set_magnifier,
+                              app_module.Magnification(level="5.5"))
+
+    def test_a_disconnect_is_not_swallowed_as_a_400(self):
+        self.cam.errors["set_magnifier"] = gp.GPhoto2Error(gp.GP_ERROR_IO_USB_FIND)
+
+        self.assertHTTPStatus(503, app_module.set_magnifier,
+                              app_module.Magnification(level="5.5"))
+
+        self.assertIsNone(self.state.camera)
 
 
 class Settings(RouteTestCase):

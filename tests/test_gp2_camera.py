@@ -16,8 +16,6 @@ GENERIC = "Canon EOS R5"
 
 
 def lock_is_held(cam):
-    # threading.Lock is neither reentrant nor owner-aware, so a non-blocking
-    # acquire reports the state from any thread, including this one.
     acquired = cam._lock.acquire(blocking=False)
     if acquired:
         cam._lock.release()
@@ -585,6 +583,131 @@ class AfPoint(CameraTestCase):
             self.cam.set_af_point(0.5, 0.5)
 
 
+class Magnifier(CameraTestCase):
+    def lagging_read_back(self, reads):
+        written = []
+        remaining = [reads]
+
+        def hook(method, *args):
+            if method == "set_single_config" and args[0] == "focusmagnifier":
+                written.append(args[1])
+            elif method == "get_config" and written:
+                widget = self.device.config.get_child_by_name("focusmagnifier")
+                if remaining[0]:
+                    remaining[0] -= 1
+                    widget.value = "Off,332,249"
+                else:
+                    widget.value = written[-1]
+        self.device.hook = hook
+
+    def test_reports_the_levels_the_body_offers(self):
+        self.assertEqual(self.cam.magnifier(), {
+            "supported": True,
+            "levels": ["Off", "1", "5.5", "11"],
+            "value": "Off",
+        })
+
+    def test_the_position_the_body_appends_is_stripped_from_the_level(self):
+        self.device.config.get_child_by_name("focusmagnifier").value = "5.5,332,249"
+        self.assertEqual(self.cam.magnifier()["value"], "5.5")
+
+    def test_setting_a_level_drives_the_widget_and_reports_the_new_state(self):
+        state = self.cam.set_magnifier("5.5")
+
+        self.assertEqual(self.driven(), [("focusmagnifier", "5.5")])
+        self.assertEqual(state["value"], "5.5")
+
+    def test_the_read_back_goes_through_the_whole_tree_not_single_config(self):
+        # get_single_config serves a stale Sony property cache after a write.
+        self.cam.set_magnifier("5.5")
+
+        reads = self.methods()[self.methods().index("set_single_config"):]
+
+        self.assertIn("get_config", reads)
+        self.assertNotIn("get_single_config", reads)
+
+    def test_a_settled_change_costs_exactly_one_tree_read(self):
+        # A tree read is ~406ms on the a7 IV and holds the bus; validating the
+        # level off one used to double the cost of every change (TODO #49).
+        self.cam.set_magnifier("5.5")
+        self.assertEqual(len(self.device.calls_named("get_config")), 1)
+        self.assertEqual(self.clock.sleeps, [])
+
+    def test_a_lagging_read_back_is_retried(self):
+        self.lagging_read_back(reads=1)
+
+        state = self.cam.set_magnifier("5.5")
+
+        self.assertEqual(state["value"], "5.5")
+        self.assertEqual(len(self.device.calls_named("get_config")), 2)
+
+    def test_a_body_that_never_reflects_the_write_reports_the_truth(self):
+        self.lagging_read_back(reads=10_000)
+
+        with self.assertLogs("camera.gp2", level="WARNING") as captured:
+            state = self.cam.set_magnifier("5.5")
+
+        self.assertEqual(state["value"], "Off")
+        self.assertIn("magnifier still reads", captured.output[0])
+        self.assertEqual(len(self.device.calls_named("get_config")),
+                         gp2.MAGNIFIER_SETTLE_ATTEMPTS)
+
+    def test_the_retries_are_bounded_and_hold_the_bus(self):
+        self.lagging_read_back(reads=10_000)
+        seen = []
+        outer = self.device.hook
+        self.device.hook = lambda method, *a: (
+            outer(method, *a), seen.append(lock_is_held(self.cam)))
+
+        self.cam.set_magnifier("5.5")
+
+        self.assertTrue(seen and all(seen))
+        self.assertEqual(self.clock.sleeps,
+                         [gp2.MAGNIFIER_SETTLE_DELAY] *
+                         (gp2.MAGNIFIER_SETTLE_ATTEMPTS - 1))
+
+    def test_a_numeric_level_is_coerced_to_the_choice_string(self):
+        self.cam.set_magnifier(11)
+        self.assertEqual(self.driven(), [("focusmagnifier", "11")])
+
+    def test_a_level_the_body_does_not_offer_is_rejected_before_the_bus(self):
+        with self.assertRaisesRegex(ValueError, "not a magnification"):
+            self.cam.set_magnifier("2.5")
+
+        self.assertEqual(self.driven(), [])
+
+    def test_switching_off_is_retried_like_a_release(self):
+        self.fail_writes("focusmagnifier", "Off", times=2)
+
+        self.cam.set_magnifier("Off")
+
+        self.assertEqual(len(self.writes_of("focusmagnifier", "Off")), 3)
+
+    def test_switching_on_is_not_retried(self):
+        self.fail_writes("focusmagnifier", "11", times=1)
+
+        with self.assertRaises(gp.GPhoto2Error):
+            self.cam.set_magnifier("11")
+
+        self.assertEqual(len(self.writes_of("focusmagnifier", "11")), 1)
+
+    def test_unsupported_on_a_body_with_no_magnifier_widget(self):
+        cam = gp2.Gphoto2Camera(self.device, GENERIC)
+
+        self.assertEqual(cam.magnifier(),
+                         {"supported": False, "levels": [], "value": None})
+        with self.assertRaisesRegex(RuntimeError, "not supported"):
+            cam.set_magnifier("5.5")
+
+        self.assertEqual(self.driven(), [])
+
+    def test_refused_after_close(self):
+        self.cam.close()
+        for call in (self.cam.magnifier, lambda: self.cam.set_magnifier("Off")):
+            with self.assertRaises(gp2.CameraDisconnected):
+                call()
+
+
 class ListSettings(CameraTestCase):
     def names(self):
         return [s["name"] for s in self.cam.list_settings()]
@@ -595,7 +718,8 @@ class ListSettings(CameraTestCase):
                           "focusmode", "datetime"])
 
     def test_action_widgets_are_never_exposed_as_settings(self):
-        for hidden in ("bulb", "movie", "autofocus", "manualfocus", "spotfocusarea"):
+        for hidden in ("bulb", "movie", "autofocus", "manualfocus",
+                       "spotfocusarea", "focusmagnifier"):
             self.assertNotIn(hidden, self.names())
 
     def test_status_widgets_are_not_settings(self):
@@ -748,6 +872,8 @@ class CloseAndReuse(CameraTestCase):
             "autofocus": self.cam.autofocus,
             "manual_focus": lambda: self.cam.manual_focus(1),
             "set_af_point": lambda: self.cam.set_af_point(0.5, 0.5),
+            "magnifier": self.cam.magnifier,
+            "set_magnifier": lambda: self.cam.set_magnifier("Off"),
             "list_settings": self.cam.list_settings,
             "set_setting": lambda: self.cam.set_setting("iso", "800"),
             "telemetry": self.cam.telemetry,
@@ -788,8 +914,6 @@ class Serialisation(CameraTestCase):
                 depth -= 1
 
         self.device.hook = hook
-        # Real clock for genuine interleaving, but with the shot gap zeroed so
-        # the shots serialise on the mutex rather than on sleep().
         self.cam._quirks = dict(self.cam._quirks, shot_gap=0.0)
         with mock.patch.object(gp2, "time", real_time):
             threads = [threading.Thread(
@@ -805,9 +929,6 @@ class Serialisation(CameraTestCase):
 
 
 class BusTimeout(CameraTestCase):
-    # These are the one place FakeClock can't help: `_bus` bounds the wait with
-    # threading.Lock's own timeout, which reads the real clock no matter what
-    # gp2.time is patched to. So the bounds are shrunk instead of the clock.
     def setUp(self):
         super().setUp()
         for name in ("BUS_TIMEOUT", "PREVIEW_BUS_TIMEOUT"):
@@ -817,8 +938,6 @@ class BusTimeout(CameraTestCase):
         self.released = threading.Event()
 
     def hold_the_bus(self):
-        # Occupied from another thread through the public API, so what the second
-        # caller runs into is exactly what a real in-flight capture looks like.
         entered = threading.Event()
 
         def hook(method, *args):
@@ -887,6 +1006,8 @@ class BusTimeout(CameraTestCase):
             "autofocus": self.cam.autofocus,
             "manual_focus": lambda: self.cam.manual_focus(1),
             "set_af_point": lambda: self.cam.set_af_point(0.5, 0.5),
+            "magnifier": self.cam.magnifier,
+            "set_magnifier": lambda: self.cam.set_magnifier("Off"),
             "list_settings": self.cam.list_settings,
             "set_setting": lambda: self.cam.set_setting("iso", "800"),
             "telemetry": self.cam.telemetry,
@@ -898,7 +1019,6 @@ class BusTimeout(CameraTestCase):
                     call()
 
     def test_a_second_capture_is_refused_too(self):
-        # Kept out of the loop above: it would deadlock against its own holder.
         self.hold_the_bus()
 
         with self.assertRaises(gp2.CameraBusy):
@@ -918,8 +1038,6 @@ class BusTimeout(CameraTestCase):
             self.assertLess(real_time.monotonic() - start, 2.0)
 
     def test_being_busy_is_not_mistaken_for_a_disconnect(self):
-        # The app drops the connection on a disconnect; a busy bus is a healthy
-        # camera, so misreading it would tear down a working connection.
         self.assertFalse(gp2.is_disconnect_error(gp2.CameraBusy("busy")))
 
     def test_a_close_that_cannot_take_the_bus_leaves_the_handle_alone(self):
@@ -940,7 +1058,7 @@ class BusTimeout(CameraTestCase):
 
         self.released.set()
 
-        for _ in range(200):            # the holder still has to finish its download
+        for _ in range(200): # the holder still has to finish its download
             try:
                 self.cam.telemetry()
                 break

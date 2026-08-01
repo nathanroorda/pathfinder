@@ -1,7 +1,7 @@
 # Pathfinder — Outstanding Issues
 
 Findings from a full-codebase review (2026-07-25), plus a second pass on
-2026-07-30 after the watchdog work landed (#39-#46, in "Later findings" at the
+2026-07-30 after the watchdog work landed (#39-#49, in "Later findings" at the
 end). Ordered by suggested fix order: physical-hardware risk first, then
 correctness, then structure, then hardening.
 
@@ -235,7 +235,7 @@ are now several commits stale — `BulbExposure` has moved from `app/app.py:28` 
   surface from every widget in the tree down to the **20 `choice` widgets** the
   listing offers. Read-only widgets, `GP_WIDGET_BUTTON`s, everything in `status`,
   and every drive in `actions` — `bulb`, `movie`, `autofocus`, `manualfocus`,
-  `spotfocusarea` — are now unreachable through this endpoint.
+  `spotfocusarea`, `focusmagnifier` — are now unreachable through this endpoint.
 - **Test:** promoted out of `test_known_gaps.py` into
   `tests/test_gp2_camera.py::SetSetting`, asserted as a round trip rather than a
   list: every name `list_settings` returns is writable, nothing else is, and a
@@ -638,6 +638,13 @@ are now several commits stale — `BulbExposure` has moved from `app/app.py:28` 
   touch." The codebase already has the right pattern in `_drive_action` — this is
   an internal inconsistency, not an unknown.
 - **Fix:** Move all three to the single-config path.
+- ⚠️ **Read #48 before starting this.** The magnifier bug established that on
+  Sony a single-widget *read* serves a cached property store a write does not
+  invalidate. So this item is only safe for the **write** half: `set_setting`'s
+  write can move, but the `list_settings()` re-read that follows it must stay on
+  `get_config()`, or the settings panel starts showing pre-write values the way
+  the magnifier select did. `_ensure_focus_mode` reads *then* writes, which is
+  the same hazard in the other order — it would decide against a stale mode.
 
 ### 19. ⚪ Every setting change costs three full config reads
 
@@ -1093,12 +1100,131 @@ consequences of the #8 fix that the docs written alongside it didn't account for
   undercuts the "the refusal names the holder is most of the diagnosis" claim in
   `camera.md`.
 
+### 48. ✅ FIXED — Focus magnifier: a single-widget read serves a stale property cache
+
+- **Status:** Feature added 2026-07-30; **fixed and verified on hardware
+  2026-07-31** (α7 IV, firmware 4.00) via `tools/hardware-check.py`. The
+  remaining work is upstream, not here.
+- **Where:** `camera/gp2.py` (`_read_magnifier`, `set_magnifier`),
+  `camera/sony.py` (`magnifier_widget`, `magnifier_off`)
+- ✅ **The write format was fine.** The item opened worrying that
+  `/main/actions/focusmagnifier` — a `RADIO` whose *get* returns
+  `Off,332,249` — might need the full `level,x,y` triple its read side produces,
+  the way `spotfocusarea` does. It does not: `check_magnifier` sets all four
+  levels (`Off / 1 / 5.5 / 11`) with the bare choice label and reads each back.
+- ✅ **The real defect was the read, and it is now measured rather than
+  inferred.** The control displayed every change one selection behind (click
+  `1×` → shows `Off`; click `11×` → shows `1×`). Cause: **`get_single_config`
+  serves a Sony property cache that a write does not invalidate.**
+  `check_read_paths` writes a level and samples both read paths in one bus hold:
+
+  ```
+  note  a single-widget read sees a write the tree read sees
+        — no: single='Off' tree='1'
+  ```
+
+  Two reads of the same property, microseconds apart, disagreeing. `set_setting`
+  never showed this because it re-reads through the whole-tree `get_config()`,
+  which does re-read the property store from the body — and `telemetry()`'s 15s
+  `get_config()` poll is what was refilling the cache, giving the staleness its
+  tidy one-step look. `_read_magnifier` now reads
+  `get_config().get_child_by_name(name)`.
+- ⚠️ **The settle poll was removed and then restored — the removal was measured
+  against conditions the removal itself changed.** It looked safe: across every
+  level the loop never once iterated. But that run was taken while
+  `set_magnifier` still did a whole-tree read *before* the write (to validate the
+  level), and dropping that read was the other half of the same change. With it
+  gone, the next hardware run read one level stale on **two of three** real
+  transitions. `_settled_magnifier` is back as an attempts-based retry
+  (`MAGNIFIER_SETTLE_ATTEMPTS` = 3, `MAGNIFIER_SETTLE_DELAY` = 0.1 s), matching
+  `_release_action`'s shape. **Lesson: two edits justified by one measurement are
+  not independent** — re-measure after each. See #49.
+- 🟠 **The finding generalises, and it is this item's real legacy.** Single-widget
+  reads are unreliable for **any** read-after-write on Sony. Nothing else in the
+  tree reads an action widget's value back, so nothing else is affected today —
+  but this bounds **#18** ("whole-tree config writes where single-widget writes
+  belong"): the *write* half may be safe to move, the *read* half is not.
+- ⬜ **Worth filing upstream.** A `libgphoto2` issue against the PTP/Sony driver:
+  `camera_get_single_config` does not refresh the Sony property store the way
+  `camera_get_config` does, so a read-after-write through the single-widget path
+  returns a stale value with no error. This is a footgun for every Sony
+  integrator, not just us, and `check_read_paths` is a ready-made reproduction.
+- **Two lessons worth keeping.**
+  1. *A hardware check that touches the state it measures is worse than no
+     check.* The first `check_read_paths` drove its write through
+     `cam.set_magnifier()`, which ends in a `get_config()` — so the tree read
+     refreshed the property store before the single-widget read was sampled, and
+     it reported a **clean pass against a body that is demonstrably stale**. That
+     false negative would have justified reverting a working fix.
+  2. *A red run must never be the correct outcome.* "The single read is stale" is
+     a finding about libgphoto2, not a defect in our code, so it is reported as a
+     `note` that leaves the exit code alone. Only claims we control are
+     assertions.
+
+### 49. 🟡 A magnifier change still holds the bus for one whole-tree read (~420 ms)
+
+- **Status:** Halved 2026-07-31 (807 ms → ~420 ms) by removing the second tree
+  read. What remains is structural and is the same cost as #19; open.
+- **Where:** `camera/gp2.py` — `set_magnifier`, `_read_magnifier`
+- **Measured on the α7 IV 2026-07-31** by `tools/hardware-check.py`: one
+  whole-tree `get_config()` costs **416 ms**, and a level change cost **807 ms =
+  1.9 tree reads**. That ratio was the whole diagnosis — two reads by design, so
+  the settle poll had never once iterated and the entire cost was the reads.
+- ✅ **Fixed: validation no longer costs a tree read.** `set_magnifier` used
+  `_read_magnifier()` (whole-tree) purely to get the widget's choices to
+  validate against. The staleness in #48 affects a widget's **value**, not its
+  **choice list** — the check confirmed both paths publish identical
+  enumerations — so validation moved to `get_single_config`. One tree read per
+  settled change (~410 ms), down from two (807 ms).
+- ⚠️ **Removing the settle poll alongside it was a mistake, now reverted.** See
+  #48: the poll's measured redundancy was an artefact of the validating read that
+  was removed in the same change. Re-measured green 2026-07-31: **295 ms settled,
+  868 ms when a retry fires, and 2 of 4 changes needed one.** The typical change
+  more than halved; the worst case is marginally above the 807 ms it replaced.
+- ✅ **The cost is now defended, not just observed.** `check_magnifier` asserts
+  the **best** change stays under `TREE_READ_BUDGET` (1.5) tree reads — a ratio,
+  so the bound holds on any body regardless of USB speed — and reports the worst
+  plus how many changes needed a settle retry as notes. Asserting the best rather
+  than the worst is deliberate: a retry is legitimate behaviour, a validating
+  tree read is not, and only the latter shows up in the floor.
+  `test_gp2_camera.py::test_a_settled_change_costs_exactly_one_tree_read` counts
+  `get_config` calls against the fake for the same property.
+- **The retry rate is the new argument for the redesign below.** 2 of 4 changes
+  lag on this body — routine, not exceptional — so the read-back is not merely
+  expensive, it is often *doubled*. An optimistic write reconciled on a shared
+  snapshot avoids the read and the retry together; nothing local can.
+- ⬜ **The remaining ~410 ms needs a redesign, not tuning.** It is the read-back,
+  and `get_config()` is the only fresh read this driver offers. It still exceeds
+  `PREVIEW_BUS_TIMEOUT` (0.25 s), so liveview drops ~12 frames per settled
+  change and ~26 when a retry fires, on a
+  control used *while composing*. Getting to zero means not doing a dedicated
+  read at all:
+  1. **Write optimistically.** The write itself is single-config and cheap.
+     Return the requested level, release the bus.
+  2. **Reconcile on a shared snapshot.** `telemetry()` (every 15 s),
+     `list_settings()`, and `_read_magnifier()` each do their own `get_config()`
+     of the *same tree*. One periodic snapshot in the camera layer, with all
+     three derived from it, makes reconciliation free — it rides a read that was
+     already happening.
+  This subsumes **#19** (three full config reads per setting change) and reduces
+  liveview stalls across every write path, not just this one. `set_setting` has
+  the identical cost today and no visible tell, which is the only reason it has
+  never been reported.
+- ⚠️ **Do not let the snapshot become another stale cache.** #48 was libgphoto2
+  serving stale values; a snapshot is our own cache one layer up with the same
+  failure mode. Rule to hold: the snapshot serves *periodic* reads (telemetry,
+  settings panel, reconcile); anything that must be current immediately after a
+  write reads fresh. Assert that split in `tools/hardware-check.py` so it is
+  enforced rather than remembered.
+
 ---
 
 ## Suggested order
 
-**Done:** #1, #5, #6, #37, #45, #46 (all verified on hardware except #45/#46,
-which are documentation-only).
+**Done:** #1, #5, #6, #37, #45, #46, #48 (all verified on hardware except
+#45/#46, which are documentation-only). #48 leaves two follow-ups: **#49** (its
+read-back still costs ~420 ms of held bus) and filing the `get_single_config`
+staleness upstream with libgphoto2.
 #2, #3, #4, #7, #8 have fixes applied and unit coverage but are 🧪. #2/#3/#4 are
 dial-blocked, see below; #7 needs a body that is actually noisy on the event
 stream; #8 needs a `systemctl`/`kill -STOP` session on the Pi (it also needs
@@ -1108,6 +1234,9 @@ stream; #8 needs a `systemctl`/`kill -STOP` session on the Pi (it also needs
 Long Exposure NR on): verifying #2, #3, and #38. Nothing else depends on this,
 so it is not on the critical path — do the items below while it waits.
 
+0. **#49** — half done (the cheap half). What's left is the shared config
+   snapshot, which subsumes **#19** and cuts a whole-tree read out of every
+   write path. Worth scheduling deliberately rather than bolting on.
 1. **#39, #40** — do these *with* the #8 hardware verification session, not
    after it. Both are defects in the watchdog itself, and #39 is the one failure
    mode the `kill -STOP` test cannot reveal (it is armed by then). Cheap: an
@@ -1116,8 +1245,10 @@ so it is not on the critical path — do the items below while it waits.
    in that item; it needs the dial too, but only to *read* one value)
 3. **#13, #14** — quirk layering and vendor contract, **before** adding Canon/Nikon
 4. **#17** — mostly closed from the config dump; what's left needs the rig:
-   `af_area_size` corner-taps and the `autofocus`/`bulb` idle value
-   (batch this with the #2/#3/#38 dial session — same setup, one trip)
+   `af_area_size` corner-taps and the `autofocus`/`bulb` idle value (batch with
+   the #2/#3/#38 dial session — same setup, one trip). Both are natural checks to
+   add to `tools/hardware-check.py` rather than do by hand; #48 is the worked
+   example of why that pays off.
 5. **#9** — compare-and-swap in `_drop_camera`
 6. **#41** — batch with #30 and #32; all three are the same lifespan/task-hygiene
    pass, and #40 is the fourth

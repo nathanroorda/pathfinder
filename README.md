@@ -25,7 +25,7 @@ For a Pathfinder device that's already been provisioned:
 3. Open `http://10.42.0.1:8080` in a browser.
 4. Plug the camera into the Pi's USB port and power it on. If the camera has a "PC Remote" / tether mode, enable it.
 5. The status line should read **Connected: \<camera model\>** within a few seconds, and a live preview appears.
-6. Use **AF** / the **◀ ▶** focus nudges to focus — or tap the live preview to move the AF point to that spot — adjust settings, and tap **Capture** for a still or **Record** to start/stop video.
+6. Use **AF** / the **◀ ▶** focus nudges to focus — or tap the live preview to move the AF point to that spot — adjust settings, and tap **Capture** for a still or **Record** to start/stop video. For critical manual focus, punch the preview in with the magnification select next to the focus nudges (**Off / 1× / 5.5× / 11×** on the α7 IV), then set it back to **Off** to compose. It lists only what the connected body offers, and doesn’t appear at all if the body has no magnifier.
 7. For a long exposure, put the body in **Bulb** mode, enter a duration next to **Bulb**, and tap it. The preview pauses for the exposure and returns on its own afterwards.
 
 ## File Layout
@@ -42,7 +42,7 @@ For a Pathfinder device that's already been provisioned:
 │   └── app.md       Backend architecture: lifecycle, timeouts, the HTTP API table
 ├── camera/
 │   ├── __init__.py  Public interface: connect() / disconnect()
-│   ├── gp2.py       libgphoto2 backend: capture, liveview, recording, focus, settings
+│   ├── gp2.py       libgphoto2 backend: capture, liveview, recording, focus, magnifier, settings
 │   ├── sony.py      Per-model quirks (timing, retry, focus widgets & modes)
 │   └── camera.md    Camera-layer internals: the bus lock, quirks, disconnect handling
 ├── logs/
@@ -59,7 +59,8 @@ For a Pathfinder device that's already been provisioned:
 │   ├── run.py            Entry point — starts the server (python tools/run.py)
 │   ├── requirements.txt  Python dependencies
 │   ├── setup.sh          Provisions a fresh Raspberry Pi (see "Provisioning" below)
-│   └── camera-dump.sh    Captures a camera's config as a test fixture
+│   ├── camera-dump.sh    Captures a camera's config as a test fixture
+│   └── hardware-check.py Asserts the claims only a real body can settle (no shutter)
 └── tests/
     ├── tests.md    How the suite works and what it deliberately misses
     ├── fakes/      A fake libgphoto2 — the suite needs no camera
@@ -78,7 +79,7 @@ way they are.
 
 ## Architecture
 
-- **`app/app.py` / `tools/run.py`** — a FastAPI app exposing a small REST API (`/api/status`, `/api/connect`, `/api/capture`, `/api/bulb`, `/api/liveview`, `/api/record/*`, `/api/autofocus`, `/api/focus`, `/api/afpoint`, `/api/telemetry`, `/api/settings`) and serving `web/` as static files. Runs under `uvicorn`. Every route is documented with its error cases in **`app/app.md`**.
+- **`app/app.py` / `tools/run.py`** — a FastAPI app exposing a small REST API (`/api/status`, `/api/connect`, `/api/capture`, `/api/bulb`, `/api/liveview`, `/api/record/*`, `/api/autofocus`, `/api/focus`, `/api/afpoint`, `/api/magnifier`, `/api/telemetry`, `/api/settings`) and serving `web/` as static files. Runs under `uvicorn`. Every route is documented with its error cases in **`app/app.md`**.
 - **`camera/`** — wraps the `gphoto2` Python binding. `gp2.py` handles connecting, capturing, live preview, recording, focus, and reading/writing settings; `sony.py` holds per-model quirks (timing, retry, focus widgets & modes) looked up by camera model string.
 - **`logs/`** — logging setup, and the directory runtime `*.log` files land in (gitignored). `tools/run.py` calls `configure_logging()` as its very first statement, before `app`/`camera` are imported, so their import-time log lines aren't lost. See **`logs/log.md`**.
 - **`web/`** — a small vanilla JS/HTML/CSS frontend. It shows a live preview and focus controls, renders whatever settings the connected camera reports (choice/toggle/range/text controls, built dynamically from the API response), and posts changes back.
@@ -92,6 +93,14 @@ python3 tests/run_tests.py -v                 # same, from anywhere
 ```
 
 No third-party test dependencies. On a machine without `fastapi`/`pydantic` the request-layer tests skip and the rest still run; on the Pi, use `.venv/bin/python` to run everything. Details, coverage and the manual hardware checks the suite can't replace are in **`tests/tests.md`**.
+
+Some claims can only be settled against a real body — a fake returns whatever it was told, which is how the focus magnifier shipped one selection stale despite a green suite. `tools/hardware-check.py` asserts those on the Pi, and fires no shutter:
+
+```
+sudo systemctl stop pathfinder      # it holds the USB claim
+.venv/bin/python tools/hardware-check.py
+sudo systemctl start pathfinder
+```
 
 ## Provisioning a New Device
 

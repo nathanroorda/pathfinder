@@ -221,6 +221,16 @@ class FakeConnectedCamera:
     def set_af_point(self, x, y):
         return self._do("set_af_point", x, y)
 
+    def magnifier(self):
+        result = self._do("magnifier")
+        return result if result is not None else {
+            "supported": True, "levels": ["Off", "1", "5.5", "11"], "value": "Off"}
+
+    def set_magnifier(self, level):
+        result = self._do("set_magnifier", level)
+        return result if result is not None else {
+            "supported": True, "levels": ["Off", "1", "5.5", "11"], "value": level}
+
     def telemetry(self):
         result = self._do("telemetry")
         return result if result is not None else [
@@ -287,6 +297,8 @@ def default_config():
             FakeWidget("bulb", gp.GP_WIDGET_TOGGLE, value=0),
             FakeWidget("movie", gp.GP_WIDGET_TOGGLE, value=0),
             FakeWidget("spotfocusarea", gp.GP_WIDGET_TEXT, value=""),
+            FakeWidget("focusmagnifier", gp.GP_WIDGET_RADIO, value="Off,332,249",
+                       label="Focus Magnifier", choices=("Off", "1", "5.5", "11")),
         ]),
         FakeWidget("status", gp.GP_WIDGET_SECTION, children=[
             FakeWidget("batterylevel", gp.GP_WIDGET_TEXT, value="87%",

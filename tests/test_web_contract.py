@@ -48,8 +48,8 @@ class ApiRoutes(unittest.TestCase):
         self.assertEqual(self.client_paths(), {
             "/api/status", "/api/capture", "/api/bulb", "/api/liveview",
             "/api/record/start", "/api/record/stop", "/api/autofocus",
-            "/api/focus", "/api/afpoint", "/api/telemetry", "/api/settings",
-            "/api/settings/{}",
+            "/api/focus", "/api/afpoint", "/api/magnifier", "/api/telemetry",
+            "/api/settings", "/api/settings/{}",
         })
 
     def test_server_routes_not_used_by_the_browser_are_accounted_for(self):
@@ -72,6 +72,33 @@ class DomIds(unittest.TestCase):
     def test_the_script_is_loaded_by_the_page(self):
         self.assertIn("script.js", self.html)
         self.assertIn("style.css", self.html)
+
+
+class MagnifierControl(unittest.TestCase):
+    def setUp(self):
+        self.html = read(INDEX_HTML)
+        self.js = read(SCRIPT_JS)
+
+    def tag(self):
+        found = re.search(r"<select[^>]*id=[\"']magnifier[\"'][^>]*>.*?</select>",
+                          self.html, re.DOTALL)
+        self.assertIsNotNone(found, "the magnifier select has gone missing")
+        return found.group(0)
+
+    def test_the_page_ships_no_magnifications_of_its_own(self):
+        # The levels are the body's; a hardcoded <option> would offer a
+        # magnification some other camera does not have.
+        self.assertNotIn("<option", self.tag())
+
+    def test_it_starts_hidden_so_an_unsupported_body_shows_no_control(self):
+        self.assertIn("hidden", self.tag())
+
+    def test_no_level_is_named_anywhere_in_the_client(self):
+        block = self.js[self.js.index("function magnifierLabel"):
+                        self.js.index("bulbBtn.addEventListener")]
+        for level in ('"Off"', "'Off'", '"5.5"', '"11"'):
+            with self.subTest(level=level):
+                self.assertNotIn(level, block)
 
 
 class SettingKinds(unittest.TestCase):

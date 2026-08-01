@@ -15,7 +15,7 @@ except Exception:
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-os.chdir(REPO_ROOT)  # app/app.py's StaticFiles(directory="web") resolves against cwd
+os.chdir(REPO_ROOT)
 
 from .fakes import fake_gphoto2  # noqa: E402
 

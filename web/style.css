@@ -101,11 +101,14 @@ button:disabled { opacity: .4; cursor: default; }
 .focus-af { flex: 1 1 auto; }
 .focus-drive { flex: 1 1 auto; display: flex; gap: .4rem; }
 .focus-drive .focus-step { flex: 0 0 auto; min-width: 3rem; }
-.focus-drive select {
+.focus-drive select,
+.focus-magnifier {
   flex: 1 1 auto; min-width: 4rem; text-align: center; padding: .4rem;
   font-size: .95rem; border-radius: .7rem; border: 1px solid currentColor;
   background: transparent; color: inherit;
 }
+.focus-magnifier { flex: 0 0 auto; }
+.focus-magnifier[hidden] { display: none; }
 
 .result { min-height: 1.2rem; margin: 1rem 0 0; opacity: .7; font-size: .9rem; }
 

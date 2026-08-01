@@ -154,6 +154,25 @@ class AfPointModel(unittest.TestCase):
 
 
 @support.requires("fastapi", "pydantic")
+class MagnificationModel(unittest.TestCase):
+    def test_accepts_a_level_label(self):
+        self.assertEqual(app_module.Magnification(level="5.5").level, "5.5")
+
+    def test_the_level_is_required(self):
+        with self.assertRaises(ValidationError):
+            app_module.Magnification()
+
+    def test_the_real_bound_is_the_widgets_choices_not_this_model(self):
+        self.assertEqual(app_module.Magnification(level="99").level, "99")
+
+    def test_rejects_null_and_containers(self):
+        for level in (None, ["Off"]):
+            with self.subTest(level=level):
+                with self.assertRaises(ValidationError):
+                    app_module.Magnification(level=level)
+
+
+@support.requires("fastapi", "pydantic")
 class SettingValueModel(unittest.TestCase):
     def test_preserves_the_json_type(self):
         for value, expected in [("800", str), (800, int), (2.8, float), (True, bool)]:

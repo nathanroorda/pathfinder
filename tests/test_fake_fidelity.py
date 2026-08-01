@@ -113,7 +113,8 @@ class TheFixtureDirectoryIsWellFormed(unittest.TestCase):
                      "no hardware dumps in tests/fixtures/ — see its README")
 class EveryDumpedBodyMatchesItsQuirks(unittest.TestCase):
     WIDGET_QUIRKS = ("movie_widget", "af_widget", "manual_focus_widget",
-                     "focus_mode_widget", "bulb_widget", "af_area_widget")
+                     "focus_mode_widget", "bulb_widget", "af_area_widget",
+                     "magnifier_widget")
 
     def vendor_matched(self):
         for fixture in dump.fixtures():
@@ -193,6 +194,15 @@ class TheQuirksMatchTheHardware(unittest.TestCase):
             with self.subTest(quirk=quirk):
                 widget = self.config.find(self.quirks[quirk])
                 self.assertEqual(widget.get_type(), gp.GP_WIDGET_TOGGLE)
+
+    def test_the_magnifier_rest_value_is_a_real_choice(self):
+        self.assertIn(self.quirks["magnifier_off"],
+                      self.choices_of(self.quirks["magnifier_widget"]))
+
+    def test_the_magnifier_is_a_writable_radio(self):
+        widget = self.config.find(self.quirks["magnifier_widget"])
+        self.assertEqual(widget.get_type(), gp.GP_WIDGET_RADIO)
+        self.assertFalse(widget.get_readonly())
 
     def test_the_af_area_widget_takes_the_x_y_string_the_driver_sends(self):
         widget = self.config.find(self.quirks["af_area_widget"])

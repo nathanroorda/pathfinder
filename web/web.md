@@ -19,7 +19,8 @@ documented in **`camera.md`**.
   script drives by `id`: `#status` (connection line), `#liveview` (the preview
   box, wrapping the `#preview` `<img>` the MJPEG stream feeds), `#telemetry` (the
   read-only battery/storage/lens chip strip), `#focus` (the
-  focus control group: `#af` plus `#focusNear`/`#focusStep`/`#focusFar`), `#shoot`
+  focus control group: `#af`, `#focusNear`/`#focusStep`/`#focusFar`, and the
+  `#magnifier` punch-in select), `#shoot`
   (Capture button), `#record` (Record/Stop button), `#bulb` (the bulb group:
   `#bulbBtn` + `#bulbSeconds`), `#result` (last-action feedback), and `#settings`
   (the dynamic settings panel). The `#preview` `<img>` also carries an overlaid
@@ -141,6 +142,50 @@ the `/api/autofocus` and `/api/focus` routes:
   far = positive) and the `#focusStep` `<select>` (Fine/Med/Coarse → `1`/`3`/`6`,
   within the body's `-7..7` `manualfocus` range) sets magnitude, so `focusNear`
   sends `-step` and `focusFar` sends `+step`.
+- **`#magnifier`** → `POST /api/magnifier` with `{level}`, punching the liveview
+  in so you can judge whether a nudge actually landed (the body reports no focus
+  position — see **`camera.md`**). This is the one control here that is **not**
+  hardcoded: it is driven entirely by the `levels` the `GET` returns, and stays
+  `hidden` when the response says `supported: false` — so a body without a
+  magnifier simply has no control, with no camera-specific knowledge in the
+  client.
+
+  It is a `<select>`, and the choice of control follows from the property:
+  magnification is an **enumeration, not a range**. The body offers
+  `Off / 1 / 5.5 / 11` and nothing between, so a select is the control that can
+  only ever express what the body actually has — no snapping, no rejected
+  values, and the server's 400 on an unlisted level stays a real guard rather
+  than something the UI routinely trips. (A number field was tried and reverted:
+  it invited `7`, which this body does not have.)
+
+  The `<select>` ships from `index.html` **empty**; `renderMagnifier()` fills it
+  from the `levels` in the API response. `test_web_contract.py` pins that — a
+  hardcoded `<option>` would offer a magnification some other camera lacks — and
+  also pins that no level string, `"Off"` included, appears anywhere in the
+  client. `magnifier_off` belongs to `camera/sony.py`; `magnifierLabel()` gets
+  by on `Number(level) > 0`, rendering a numeric level as `5.5×` and anything
+  else verbatim, which is presentation only and needs no such knowledge.
+
+`loadMagnifier()` runs on the same connect *transition* as `loadSettings()` /
+`loadTelemetry()` (levels can't change while a body stays plugged in, so there's
+no reason to poll it), and the select is hidden again on disconnect and on a
+server-unreachable poll. The `change` handler re-renders from the **POST's**
+response rather than trusting the select, so if the body clamps or refuses the
+level the control snaps to reality; on a thrown error it re-runs
+`loadMagnifier()` for the same reason — otherwise the select would sit showing a
+magnification the body never entered.
+
+> **Why the select once lagged a step behind.** Re-rendering from the response is
+> only correct if the response is current, and the first version of this control
+> displayed every change one selection late — pick `1×`, get `Off` back; pick
+> `11×`, get `1×`. The bug was **entirely server-side**: the backend read the
+> level back with a single-widget read, which on Sony serves a cached property
+> store the write doesn't invalidate, so it returned the previous value and this
+> handler faithfully rendered it. Fixed in `camera/gp2.py` by reading through the
+> whole config tree (see **`camera.md`**); nothing here needed to change. Worth
+> knowing before "fixing" a stale control in this file: a control that corrects
+> itself on the *next* interaction is reporting a stale read, and patching the
+> client to trust its own widget would only hide it.
 
 Unlike `#shoot`, these are **not** disabled while recording — the backend permits
 focus writes mid-take (rack focus), so the UI leaves them live. Like the other

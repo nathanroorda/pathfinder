@@ -13,6 +13,8 @@ GENERAL = {
     "bulb_widget": "bulb",
     "af_area_widget": "spotfocusarea",
     "af_area_size": (640, 480),
+    "magnifier_widget": "focusmagnifier",
+    "magnifier_off": "Off",
 }
 
 MODELS = {

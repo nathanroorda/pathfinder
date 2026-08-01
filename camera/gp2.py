@@ -20,6 +20,8 @@ DRAIN_TIMEOUT = 1.0
 DRAIN_POLL_MS = 200
 BUS_TIMEOUT = 2.0
 PREVIEW_BUS_TIMEOUT = 0.25
+MAGNIFIER_SETTLE_ATTEMPTS = 3
+MAGNIFIER_SETTLE_DELAY = 0.1
 
 DEFAULT_QUIRKS = {
     "shot_gap": 0.0,
@@ -36,6 +38,8 @@ DEFAULT_QUIRKS = {
     "bulb_widget": None,
     "af_area_widget": None,
     "af_area_size": (0, 0),
+    "magnifier_widget": None,
+    "magnifier_off": None,
 }
 VENDORS = [sony]
 
@@ -254,6 +258,54 @@ class Gphoto2Camera:
             w, h = self._quirks["af_area_size"]
             self._drive_action(widget, f"{_scale(x, w)},{_scale(y, h)}")
 
+    def magnifier(self):
+        with self._bus("magnifier"):
+            self._require_open()
+            return self._read_magnifier()
+
+    def set_magnifier(self, level):
+        with self._bus("set_magnifier"):
+            self._require_open()
+            name = self._quirks["magnifier_widget"]
+            if not name:
+                raise RuntimeError(
+                    "focus magnification is not supported on this body")
+            level = str(level)
+            levels = _choices(self._cam.get_single_config(name))
+            if level not in levels:
+                raise ValueError(
+                    f"{level!r} is not a magnification this body offers "
+                    f"({', '.join(levels)})")
+            if level == self._quirks["magnifier_off"]:
+                self._release_action(name, level)
+            else:
+                self._drive_action(name, level)
+            return self._settled_magnifier(level)
+
+    def _settled_magnifier(self, level):
+        for attempt in range(MAGNIFIER_SETTLE_ATTEMPTS):
+            if attempt:
+                time.sleep(MAGNIFIER_SETTLE_DELAY)
+            state = self._read_magnifier()
+            if state["value"] == level:
+                return state
+        log.warning("magnifier still reads %r after %d reads, %r was accepted — "
+                    "reporting what the body says, not what was asked",
+                    state["value"], MAGNIFIER_SETTLE_ATTEMPTS, level)
+        return state
+
+    def _read_magnifier(self):
+        name = self._quirks["magnifier_widget"]
+        if not name:
+            return {"supported": False, "levels": [], "value": None}
+        # A single-widget read serves a stale Sony cache here; see camera.md.
+        widget = self._cam.get_config().get_child_by_name(name)
+        return {
+            "supported": True,
+            "levels": _choices(widget),
+            "value": _magnifier_level(widget.get_value()),
+        }
+
     def _ensure_focus_mode(self, acceptable, target):
         name = self._quirks["focus_mode_widget"]
         if not name or not target:
@@ -345,8 +397,7 @@ def _describe(widget):
         "value": widget.get_value(),
     }
     if kind == "choice":
-        info["choices"] = [widget.get_choice(i)
-                           for i in range(widget.count_choices())]
+        info["choices"] = _choices(widget)
     elif kind == "range":
         info["min"], info["max"], info["step"] = widget.get_range()
     return info
@@ -366,6 +417,16 @@ def _describe_status(widget):
 
 def _scale(fraction, size):
     return int(round(min(1.0, max(0.0, float(fraction))) * size))
+
+
+def _choices(widget):
+    return [widget.get_choice(i) for i in range(widget.count_choices())]
+
+
+def _magnifier_level(value):
+    if value is None:
+        return None
+    return str(value).split(",")[0]
 
 
 def _coerce(widget, value):
