@@ -1,3 +1,4 @@
+import types
 import unittest
 from unittest import mock
 
@@ -131,14 +132,52 @@ class QuirkResolution(unittest.TestCase):
             gp2._quirks_for("Canon EOS R5")
         self.assertIn("Canon EOS R5", "\n".join(captured.output))
 
-    def test_every_vendor_table_covers_every_default_key(self):
+    def test_no_vendor_table_names_a_quirk_that_does_not_exist(self):
         for vendor in gp2.VENDORS:
             with self.subTest(vendor=vendor.__name__):
-                self.assertEqual(set(vendor.GENERAL), set(gp2.DEFAULT_QUIRKS))
+                self.assertLessEqual(set(vendor.GENERAL), set(gp2.DEFAULT_QUIRKS))
 
     def test_model_overrides_introduce_no_unknown_keys(self):
         for override in sony.MODELS.values():
             self.assertLessEqual(set(override), set(gp2.DEFAULT_QUIRKS))
+
+    def test_a_vendor_table_need_not_repeat_every_default(self):
+        partial_vendor = types.SimpleNamespace(
+            __name__="acme",
+            quirks=lambda model: {"shot_gap": 0.5} if "acme" in model.lower() else None)
+
+        with mock.patch.object(gp2, "VENDORS", [partial_vendor]):
+            quirks = gp2._quirks_for("ACME Snapmaster")
+
+        self.assertEqual(set(quirks), set(gp2.DEFAULT_QUIRKS))
+        self.assertEqual(quirks["shot_gap"], 0.5)
+        self.assertEqual(quirks["movie_widget"], gp2.DEFAULT_QUIRKS["movie_widget"])
+
+    def test_a_vendor_naming_a_quirk_that_does_not_exist_is_refused(self):
+        typo_vendor = types.SimpleNamespace(
+            __name__="acme", quirks=lambda model: {"af_widgets": "autofocus"})
+
+        with mock.patch.object(gp2, "VENDORS", [typo_vendor]):
+            with self.assertRaises(ValueError) as caught:
+                gp2._quirks_for("ACME Snapmaster")
+
+        self.assertIn("af_widgets", str(caught.exception))
+
+    def test_layering_does_not_mutate_the_shared_default_table(self):
+        before = dict(gp2.DEFAULT_QUIRKS)
+        partial_vendor = types.SimpleNamespace(
+            __name__="acme", quirks=lambda model: {"shot_gap": 99.0})
+
+        with mock.patch.object(gp2, "VENDORS", [partial_vendor]):
+            gp2._quirks_for("ACME Snapmaster")
+
+        self.assertEqual(gp2.DEFAULT_QUIRKS, before)
+
+    def test_sony_no_longer_repeats_a_default_it_agrees_with(self):
+        self.assertNotIn("movie_widget", sony.GENERAL)
+        self.assertEqual(
+            gp2._quirks_for("Sony Alpha-A7 IV (PC Control)")["movie_widget"],
+            "movie")
 
     def test_first_matching_vendor_wins(self):
         other = mock.Mock()

@@ -1,6 +1,6 @@
 # Testing
 
-Pathfinder's test suite: 339 tests, `unittest` only, no third-party test
+Pathfinder's test suite: 357 tests, `unittest` only, no third-party test
 dependencies, and **no camera required**. The whole camera layer runs against a
 fake libgphoto2, so the suite is a normal edit-run-edit loop on a laptop rather
 than something you can only do at the rig.
@@ -27,14 +27,13 @@ tests/
                           (see also ../tools/hardware-check.py — assertions
                            that need a body, not a fake)
 ├── test_sony_quirks.py     9   vendor/model quirk resolution
-├── test_gp2_helpers.py    37   coercion, clamping, describe, disconnect codes
-├── test_gp2_camera.py    127   Gphoto2Camera against a fake device
+├── test_gp2_helpers.py    48   coercion, clamping, describe, quirk layering
+├── test_gp2_camera.py    132   Gphoto2Camera against a fake device
 ├── test_app_models.py     31   request validation + the bulb ceiling
 ├── test_app_routes.py     67   routes, error mapping, connection state machine
 ├── test_web_contract.py   12   web/ ↔ app/app.py seams (static text checks)
 ├── test_watchdog.py       23   sd_notify, the heartbeat, and the systemd unit
-├── test_fake_fidelity.py  31   do the doubles still resemble the real thing
-└── test_known_gaps.py      2   TODO.md hazards, as expected-to-fail tests
+└── test_fake_fidelity.py  35   do the doubles still resemble the real thing
 ```
 
 ## Running it
@@ -68,12 +67,12 @@ report success — which it did, until it was fixed.
 
 The dev machine has no pip, no venv, and no `gphoto2`/`fastapi`, so **118 tests
 skip there** — everything that needs FastAPI or pydantic — plus the 5 that
-compare the fake against the real binding. The remaining 216 execute, including
+compare the fake against the real binding. The remaining 234 execute, including
 the entire camera layer:
 
 ```
-Ran 339 tests in 1.3s
-OK (skipped=123, expected failures=2)
+Ran 357 tests in 1.3s
+OK (skipped=123)
 ```
 
 That count assumes a hardware dump is present in `fixtures/`. With none it is
@@ -414,22 +413,45 @@ explicitly rather than ignored.
 
 ## Known gaps
 
-`test_known_gaps.py` holds one test per open hazard from `TODO.md`, each
+`test_known_gaps.py` used to hold one test per open hazard from `TODO.md`, each
 asserting the behaviour the code *should* have and marked
 `@unittest.expectedFailure`. This gives each fix a ready-made acceptance test,
 written while the hazard was understood rather than months later.
 
-| Test | TODO | Asserts |
-|---|---|---|
-| `test_a_vendor_table_need_not_repeat_every_default` | #13 | A vendor table missing a key still yields a complete quirk set. Today `_quirks_for` returns the vendor dict as-is, so an omission is a `KeyError` inside a request handler on someone else's camera. |
-| `test_zero_retry_attempts_fails_clearly` | #34 | `capture_retry_attempts = 0` raises something that names the cause. Today the loop body never runs, the function returns `None`, and it surfaces as an `AttributeError` in `_download`. |
+**The file is currently gone, because it emptied.** Its last two tests were
+TODO #13 (a vendor table shouldn't have to repeat every default) and #34
+(`capture_retry_attempts = 0` should fail clearly instead of returning `None`).
+Both were fixed on 2026-08-03 and promoted:
 
-When someone fixes one of these, the test stops failing and unittest reports an
+| Was | Now lives in |
+|---|---|
+| `QuirkLayering.test_a_vendor_table_need_not_repeat_every_default` | `test_gp2_helpers.QuirkResolution`, alongside three new siblings covering unknown-key refusal and shared-table mutation |
+| `RetryBounds.test_zero_retry_attempts_fails_clearly` | `test_gp2_camera.CaptureRetry`, with `test_a_refused_attempt_count_reaches_no_shutter` |
+
+Recreate the file when the next hazard is worth pinning — the mechanism is worth
+keeping, and it earned its keep twice. The workflow: write the test asserting
+the behaviour you want, mark it `@unittest.expectedFailure`, and reference the
+TODO number in a comment on the decorator. While the bug exists the suite stays
+green. When someone fixes it the test stops failing and unittest reports an
 **unexpected success — which fails the run**. That is the signal to delete the
 decorator and move the test into the module where it belongs. So a red run from
 that file means "you fixed something, go promote the test", never "something
-broke". Nothing there asserts current behaviour, so no test has to be updated to
-keep a known bug alive.
+broke". Nothing there ever asserts current behaviour, so no test has to be
+updated to keep a known bug alive.
+
+Two things learned from promoting these:
+
+- **Restate the tests the bug was propping up.** #13 was partly *enforced* by
+  `test_every_vendor_table_covers_every_default_key`, which asserted every
+  vendor table has exactly the default key set — i.e. it required the
+  duplication the TODO wanted removed. It became
+  `test_no_vendor_table_names_a_quirk_that_does_not_exist` (subset, not
+  equality). A test that pins a bug in place is easy to miss, because it is
+  green the whole time.
+- **Check the promoted test against the old code.** Both were re-run against a
+  copy of the tree with the two fixes reverted: 3 quirk failures and the exact
+  `AttributeError: 'NoneType' object has no attribute 'name'` #34 described. A
+  promoted test that passes either way has stopped testing anything.
 
 ## What is *not* covered
 

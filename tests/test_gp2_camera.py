@@ -179,6 +179,22 @@ class CaptureRetry(CameraTestCase):
 
         self.assertEqual(len(self.device.calls_named("capture")), 1)
 
+    def test_zero_retry_attempts_fails_clearly(self):
+        self.cam._quirks = dict(self.cam._quirks, capture_retry_attempts=0)
+
+        with self.assertRaises(ValueError) as caught:
+            self.cam.capture(save_dir=self.save_dir)
+
+        self.assertIn("capture_retry_attempts", str(caught.exception))
+
+    def test_a_refused_attempt_count_reaches_no_shutter(self):
+        self.cam._quirks = dict(self.cam._quirks, capture_retry_attempts=0)
+
+        with self.assertRaises(ValueError):
+            self.cam.capture(save_dir=self.save_dir)
+
+        self.assertEqual(self.device.calls_named("capture"), [])
+
 
 class DrainEvents(CameraTestCase):
     def endless_events(self, event=None):

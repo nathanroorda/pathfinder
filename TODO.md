@@ -4,7 +4,8 @@ Findings from a full-codebase review (2026-07-25); a second pass on 2026-07-30
 after the watchdog work landed (#39-#49, in "Later findings"); and a third pass
 on **2026-08-03** measuring the tree against the Version 1 scope requirement
 *"full action and setting control over compatible Sony cameras"*
-(`documentation/pathfinder_v1.tex`) — #50-#57, in "Requirement gaps" at the end.
+(`documentation/pathfinder_v1.tex`) — #50-#59, in "Requirement gaps" at the end
+(no #53; it was withdrawn).
 Ordered by suggested fix order: physical-hardware risk first, then correctness,
 then structure, then hardening.
 
@@ -601,7 +602,39 @@ are cheap to settle:
 
 ## Tier 3 — Structure & future camera support
 
-### 13. 🟠 Vendor quirks replace the defaults instead of layering over them
+### 13. ✅ FIXED — Vendor quirks replace the defaults instead of layering over them
+
+- **Status:** Fixed 2026-08-03. `_quirks_for` now returns
+  `_layered_over_defaults(q, vendor)` = `{**DEFAULT_QUIRKS, **q}`, so a vendor
+  declares only what differs. `sony.GENERAL` dropped `movie_widget` — the one
+  key of 16 where it agreed with the default — proving the mechanism on the only
+  vendor we have. The **unmatched** path still returns `DEFAULT_QUIRKS` itself,
+  not a copy, because `test_fake_fidelity` uses that identity as the "no vendor
+  claimed this body" signal (`quirks is not gp2.DEFAULT_QUIRKS`); the matched
+  path returns a fresh dict, so layering never mutates the shared table, and a
+  test pins that.
+- **The unknown-key half is enforced too, and it raises.** A vendor naming a key
+  `DEFAULT_QUIRKS` doesn't define — the `af_widgets` typo this item predicted —
+  now raises `ValueError` naming the module and the key, at quirk-resolution
+  time (i.e. `connect()`). A bad vendor module therefore means the camera never
+  connects rather than half-working, which is the right trade for a programming
+  error that is otherwise invisible: merged in silently, sitting in the table
+  doing nothing, presenting as "the feature just doesn't work on this body".
+- ⚠️ **A green test was holding the bug in place.**
+  `test_every_vendor_table_covers_every_default_key` asserted
+  `set(vendor.GENERAL) == set(DEFAULT_QUIRKS)` — it *required* the duplication
+  this item exists to remove, and it passed the whole time. Restated as
+  `test_no_vendor_table_names_a_quirk_that_does_not_exist` (subset, not
+  equality). Worth remembering when picking up any other item here: check
+  whether a test is pinning the thing you're trying to change.
+- **Test:** the `@expectedFailure` acceptance test was promoted out of
+  `test_known_gaps.py` into `test_gp2_helpers.QuirkResolution`, with three new
+  siblings (unknown-key refusal, no mutation of the shared table, and that Sony
+  really has stopped repeating `movie_widget`). Verified to fail against the
+  pre-fix tree: 3 failures.
+
+<details>
+<summary>Original finding</summary>
 
 - **Where:** `camera/gp2.py:452-461` (`_quirks_for`), `camera/gp2.py:26-43`
   (`DEFAULT_QUIRKS`), `camera/sony.py:1-18` (`GENERAL`)
@@ -623,6 +656,8 @@ are cheap to settle:
   keys" half is already enforced by
   `tests/test_gp2_helpers.py::QuirkResolution`.
 
+</details>
+
 ### 14. 🟡 No declared vendor contract
 
 - **Where:** `camera/gp2.py:44` (`VENDORS = [sony]`)
@@ -632,6 +667,15 @@ are cheap to settle:
   explicit contract is both documentation and a test surface.
 - **Fix:** A `Protocol` (or a small registry decorator) plus a validation pass over
   each registered vendor at import.
+- **Partly served by #13 (2026-08-03).** `_layered_over_defaults` now refuses a
+  vendor table naming a key that doesn't exist, which is one clause of the
+  contract enforced at runtime — and `camera.md` documents "declare only what
+  differs". What is still prose-only: that a vendor module must expose
+  `quirks(model)` at all, that it returns `None` for a body it doesn't claim,
+  and (for the tests) that it exposes `GENERAL` and `MODELS`. Note the check
+  fires at `connect()`, not at import, so an unused vendor module in `VENDORS`
+  is still unvalidated until a camera is plugged in — the import-time pass this
+  item asks for would close that.
 
 ### 15. 🟡 Model matching is fragile, and the per-model layer has never been exercised
 
@@ -955,7 +999,31 @@ These are the places it's weaker than it looks.
 - **Fix:** Factor the shared error mapping into one decorator or helper so every
   route behaves the same way, and so a *new* route gets it by construction.
 
-### 34. ⚪ `_capture_with_retry` can return `None`
+### 34. ✅ FIXED — `_capture_with_retry` can return `None`
+
+- **Status:** Fixed 2026-08-03, all three occurrences. `_at_least_one(name,
+  count)` validates the attempt count at the point of use and raises
+  `ValueError` naming the setting. `_capture_with_retry` uses it on the
+  `capture_retry_attempts` quirk; `_release_action` and `_settled_magnifier` use
+  it on their module constants. The constants are checked too, even though only
+  the quirk is vendor-supplied, because the recurring thing is the *shape* — a
+  future constant added the same way is covered without anyone remembering to
+  think about it.
+- **Why point-of-use rather than at quirk resolution:** it holds regardless of
+  how the value arrived, including a table patched at runtime, which is exactly
+  what the acceptance test does.
+- **Test:** promoted out of `test_known_gaps.py` into
+  `test_gp2_camera.CaptureRetry`, plus
+  `test_a_refused_attempt_count_reaches_no_shutter` — the refusal must land
+  *before* any shutter fires, which matters more than the exception type on a
+  device that takes photographs. Verified against the pre-fix tree: both error
+  with exactly the `AttributeError: 'NoneType' object has no attribute 'name'`
+  this item predicted.
+- **Where:** `camera/gp2.py` (`_at_least_one`, `_capture_with_retry`,
+  `_release_action`, `_settled_magnifier`)
+
+<details>
+<summary>Original finding</summary>
 
 - **Where:** `camera/gp2.py:201-212`
 - **Issue:** If a quirk sets `capture_retry_attempts <= 0`, the loop body never
@@ -976,8 +1044,14 @@ These are the places it's weaker than it looks.
   general fix is the same in all three: clamp the count at the point of use
   (`max(1, n)`), or assert it at import.
 - **Fix:** Validate the quirk value (`max(1, attempts)`) or raise explicitly.
+  *(Chose "raise". `max(1, n)` would have silently turned a bad vendor value
+  into a working capture, which is the same silent-failure class the item is
+  about — and the checked-in acceptance test demanded an exception, so clamping
+  would have left it red.)*
 - **Test:** acceptance test waiting at
   `tests/test_known_gaps.py::RetryBounds` (expected-failure).
+
+</details>
 
 ### 35. ⚪ Settings panel re-renders mid-interaction
 
@@ -1002,31 +1076,49 @@ These are the places it's weaker than it looks.
 
 ### 37. ✅ FIXED — No tests
 
-- **Status:** Fixed 2026-07-25. `tests/` — **339 tests** (228 at the time of the
+- **Status:** Fixed 2026-07-25. `tests/` — **357 tests** (228 at the time of the
   fix, 251 after #7, 295 before the hardware-fixture suite, 311 before the
-  magnifier work), stdlib `unittest`, no third-party test dependencies. A fake
+  magnifier work, 339 before #56, 353 before #13/#34), stdlib `unittest`, no
+  third-party test dependencies. A fake
   `gphoto2` binding (`tests/fakes/`) is installed into `sys.modules` before
   `camera` is imported, so the whole camera layer runs with no libgphoto2 and no
-  camera attached (**216 of 339** execute on the dev host, which has no pip).
+  camera attached (**234 of 357** execute on the dev host, which has no pip).
   Covers exactly what this item asked for: quirk resolution, `_coerce`, the
   error→HTTP-status mapping, and the disconnect/reconnect state machine. See
   `tests/tests.md`.
-- **Counts re-measured 2026-08-03 on the dev host:** `Ran 339 tests in 1.304s …
-  OK (skipped=123, expected failures=2)`. `tests/tests.md:75` already carries
-  339; this item said 311/197 and was the stale one. The two expected failures
-  are still the remaining `test_known_gaps.py` items (#13, #34).
-- **Last full run on the Pi, 2026-07-26** (under `.venv/bin/python`, after the
-  #7 fix): `Ran 251 tests in 1.328s … OK (expected failures=2)` with **zero
-  skips** — so the FastAPI/pydantic tests and the fake-vs-real-binding fidelity
-  checks all executed against the genuine binding. **That run is now 88 tests
-  out of date**; the magnifier and hardware-fixture suites have never been run
-  against the real binding. Re-run it during the next Pi session — it is one
-  command and it is the only thing that proves the fake and the binding still
-  agree.
-- **Note:** `tests/test_known_gaps.py` holds an `@expectedFailure` acceptance
-  test for each remaining hazard — now #13 and #34, after #5's and #6's were
-  promoted. Fixing one makes the suite red with an *unexpected success* — the
-  cue to promote the test, not a regression.
+- **Dev host, 2026-08-03:** `Ran 357 tests in 1.299s … OK (skipped=123)`.
+- ✅ **Full run on the Pi, 2026-08-03** (under `.venv/bin/python`, after
+  #13/#34/#56): `Ran 357 tests in 3.900s … OK` — **zero skips, zero expected
+  failures**, so all 357 executed against the genuine binding, including the
+  FastAPI/pydantic route tests and the fake-vs-real-binding fidelity checks that
+  skip on the dev host. The fake and the binding still agree.
+  This closes the gap this item flagged: the previous full-binding run was
+  2026-07-26 at 251 tests, so the magnifier work, the hardware-fixture suite,
+  #56 and the quirk-layering change had never been exercised against the real
+  binding until now. An intermediate run the same day (353 tests, 2 expected
+  failures) predated #13/#34.
+- ⚠️ **The first attempt at that run reported `FAILED (unexpected successes=2)`,
+  and the cause is a deployment hazard worth knowing.** The Pi still had
+  `tests/test_known_gaps.py` — the SFTP sync pushes changed files but does not
+  remove deleted ones, so a file deleted in git keeps running on the device.
+  Here it was harmless (a duplicate of two promoted tests, reporting exactly the
+  unexpected-success signal it was designed to give). The general case is not:
+  a stale module under `camera/`, `app/` or `web/` stays importable and
+  serveable, so **the device can run code that no longer exists in the
+  repository**. A stale `web/script.js` is the most likely explanation for the
+  phantom `zoom`/`focalposition` 404s during #56. See **#59**.
+- **What a green suite here does and does not prove.** It proves the code runs
+  correctly against the real `gphoto2` binding and the real request stack. It
+  proves nothing about the camera: no test touches USB, opens a port, or calls
+  `camera.connect()` for real. #56's panel appearance, #50's M-mode question and
+  every 🧪 item still need the rig.
+- ✅ **There are no expected failures left, and `test_known_gaps.py` is gone.**
+  Its last two — #13 (`QuirkLayering`) and #34 (`RetryBounds`) — were fixed
+  2026-08-03 and their tests promoted into `test_gp2_helpers.QuirkResolution`
+  and `test_gp2_camera.CaptureRetry`, following #5 and #6. The file emptied, so
+  it was deleted; `tests/tests.md` keeps the mechanism documented and says how
+  to recreate it for the next hazard worth pinning. Current: **357 tests, no
+  expected failures.**
 - **Still open:** the libgphoto2 `vusb` dummy driver is unused, so nothing
   exercises the real binding end-to-end; there is no CI (the suite needs only
   `fastapi`+`pydantic`, so this is cheap); and the frontend has only static
@@ -1748,6 +1840,55 @@ and three of the four items below are consequences of that one pair of sets.
   another changes is more disorienting than one that greys out, and #35's
   re-render already moves the panel around more than it should.
 
+### 59. 🟠 The deploy path cannot delete files — the device runs code that isn't in git
+
+- **Where:** `.vscode/sftp.json` (the editor sync that is the only deploy
+  mechanism), `README.md` "Provisioning" (which describes `git clone` once, and
+  no update path at all)
+- **Issue:** Deployment is an SFTP sync from the editor. It pushes new and
+  changed files; it does not remove files deleted upstream. So the Pi's tree is
+  the **union** of every file that has ever existed there, not a copy of the
+  repository. Found 2026-08-03: `tests/test_known_gaps.py` was deleted in git
+  after its tests were promoted, and the Pi kept running it — `Ran 359 tests …
+  FAILED (unexpected successes=2)` against a local `Ran 357 tests … OK`.
+- **Why it matters:** That instance was harmless and even self-announcing. The
+  general case is neither. A deleted module under `camera/` or `app/` stays
+  **importable**; a deleted or renamed file under `web/` stays **served**. Both
+  fail silently and in the worst possible direction — the device behaves
+  according to code you cannot find, because it isn't there any more. It also
+  breaks the assumption every other item in this file rests on: that a fix
+  verified on the Pi was a test of the code in the repository.
+  Strongly suspected in #56's phantom 404s, where the panel offered live
+  controls for `zoom` and `focalposition` that the backend correctly refused —
+  the signature of a stale `web/script.js` running against a current server.
+- **Why it is worse than ordinary staleness:** there is no version marker
+  anywhere. `/api/status` reports the camera model, not the build. Nothing in
+  the log line at startup says which commit is running. So the failure has no
+  tell at all until behaviour diverges, and then the first hour is spent reading
+  source that was never executing. Compare #25 (unpinned libgphoto2): same
+  family — "which build is actually on this device" — and the same fix
+  direction.
+- **Fix, in rough order of payoff:**
+  1. **Make the deploy a `git` operation.** `git pull` on the Pi (or a push to a
+     bare repo with a checkout hook) makes the device tree definitionally equal
+     to a commit, deletions included. The service already has a
+     `WorkingDirectory` at the repo root, so nothing else changes. This also
+     gives the README the update path it currently lacks entirely.
+  2. **Report the build at runtime.** `git rev-parse --short HEAD` at startup,
+     logged once and exposed on `/api/status`, so "what is this device running"
+     is answerable without guessing. Cheap, and it makes any future instance of
+     this self-diagnosing.
+  3. If the SFTP sync stays, enable whatever "mirror/delete remote" option it
+     has, and treat that as a stopgap rather than the fix — it is still a sync
+     of a *working tree*, so uncommitted local edits reach the device.
+- **Note:** `.vscode/sftp.json` holds a plaintext SSH password. It is correctly
+  gitignored and was never committed (verified in the Tier 4 sweep), but any
+  change to the deploy mechanism should take the opportunity to move to a key.
+
+---
+
+## Suggested order
+
 **Done:** #1, #5, #6, #37, #45, #46, #48 (all verified on hardware except
 #45/#46, which are documentation-only). #48 leaves two follow-ups: **#49** (its
 read-back still costs ~420 ms of held bus) and filing the `get_single_config`
@@ -1759,7 +1900,7 @@ stream; #8 needs a `systemctl`/`kill -STOP` session on the Pi (it also needs
 
 **Two tracks now, and they don't compete for the same time.** Everything from
 the first two review passes is *reliability* work on features that exist.
-#50-#57 are *requirement* work — the distance between the code and what Version
+#50-#59 are *requirement* work — the distance between the code and what Version
 1 says it does. The reliability list is longer, but the requirement list is what
 someone reading `documentation/pathfinder_v1.tex` will find first.
 
@@ -1773,6 +1914,11 @@ dumped in P", which is also what made #3's verification round void.
 Long Exposure NR on): verifying #2, #3, #38, and settling #50. Do the items
 below while it waits.
 
+0. **#59** — the deploy path can't delete files, so the Pi can run code that
+   isn't in the repository. Do this before the next rig session, not after: it
+   undermines every "verified on hardware" note in this file, and the cheap half
+   (log the commit at startup, expose it on `/api/status`) is an hour's work
+   that makes any future instance self-diagnosing.
 1. **#49** — half done (the cheap half). What's left is the shared config
    snapshot, which subsumes **#19** and cuts a whole-tree read out of every
    write path. Worth scheduling deliberately rather than bolting on — and note
@@ -1787,10 +1933,11 @@ below while it waits.
 4. **#38** — refuse `bulb` when the body is not in BULB. Note the discovery
    command in that item needs correcting (see its ⚠️ bullet) or #56 landing
    first.
-5. **#13, #14** — quirk layering and vendor contract, **before** adding
-   Canon/Nikon *and before #51/#52*, which both want to add vendor-table keys.
-   Adding keys to a table that is duplicated in full is how the duplication got
-   from 13 keys to 16.
+5. ✅ **#13** — done 2026-08-03, along with **#34**. **#14** (the declared vendor
+   contract) is still open and is now the cheaper half of what remains: #13's
+   unknown-key check enforces one clause of it at connect time, so what's left
+   is the `Protocol` and an import-time pass. Still wanted **before** adding
+   Canon/Nikon *and before #51/#52*, which both add vendor-table keys.
 6. **#51, #52** — the `/main/other` allowlists, settings and telemetry. One
    mechanism, two filters; ship together. This is the bulk of what "full setting
    control" is missing, and #52 also hands #12 its camera-truth read.
@@ -1814,9 +1961,19 @@ below while it waits.
 13. Everything else, opportunistically. #42-#44, #47 and #57 are all small and
     independent — good filler while hardware access is blocked.
 
-#13 and #34 each have an `@expectedFailure` acceptance test already written in
-`tests/test_known_gaps.py` — start there. #5's and #6's have been promoted into
-the main suite now that they pass.
+**The `@expectedFailure` backlog is empty.** #5, #6, #13 and #34 all had an
+acceptance test written while the hazard was understood, and all four have now
+been fixed and promoted into the main suite; `tests/test_known_gaps.py` was
+deleted when it emptied. `tests/tests.md` documents how to recreate it — worth
+doing for the next hazard you understand well enough to write the assertion for,
+which right now is probably **#9** (compare-and-swap in `_drop_camera`) or
+**#12** (`self.recording` vs camera truth), both of which have a clear
+"should" and no test.
+
+⚠️ **#13 taught one thing worth carrying:** a *green* test can be what holds a
+bug in place. `test_every_vendor_table_covers_every_default_key` required the
+exact duplication #13 existed to remove, and passed the whole time. Before
+changing behaviour here, check what the current tests are pinning.
 
 **A standing rule, learned from #56.** The read surface (`_listable_widgets`)
 and the write surface (`_settable_widgets`) are deliberately different sets, and

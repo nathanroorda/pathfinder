@@ -127,13 +127,39 @@ Runs entirely under `_lock`, in four steps:
    `capture_retry_attempts` times on a generic `GP_ERROR`, with a 1s backoff and
    another event drain between tries. Transport-level errors are *not* retried
    here — they propagate so the app can drop and rebuild the connection (see
-   below).
+   below). The attempt count goes through `_at_least_one` first, so a quirk of
+   `0` raises a `ValueError` naming `capture_retry_attempts` **before any
+   shutter fires** — see "Bounded loops" below.
 4. **Download** the resulting file to `CAPTURE_DIR` (env `PATHFINDER_CAPTURE_DIR`,
    default `captures/`), prefixed with a unix timestamp to avoid name
    collisions. Returns the saved path.
 
 A capture is refused with `RuntimeError` if `self.recording` is set — stills and
 video are mutually exclusive on the body — which `app/app.py` surfaces as a 409.
+
+### Bounded loops: `_at_least_one`
+
+Three functions retry a fixed number of times — `_capture_with_retry`
+(`capture_retry_attempts`, a quirk), `_release_action` (`RELEASE_ATTEMPTS`) and
+`_settled_magnifier` (`MAGNIFIER_SETTLE_ATTEMPTS`). Each was written as
+`for i in range(n): … return`, and none had a branch for "the loop ran zero
+times". With `n = 0` the results were, respectively: fall off the end returning
+`None`, which surfaced as `AttributeError: 'NoneType' object has no attribute
+'name'` inside `_download` (TODO #34); `raise failure` on an unbound name; and a
+log line reading an unbound `state`. All three are confusing crashes located
+somewhere other than the cause — a bad count in a vendor file, diagnosed in a
+download routine.
+
+`_at_least_one(name, count)` validates at the point of use and raises
+`ValueError` naming the setting. It is called on the module constants too, not
+just the quirk, even though only the quirk is vendor-supplied: the cost is one
+comparison, and the point is that the *shape* of the bug is what recurs. A
+future constant added the same way is covered without anyone remembering to
+think about it.
+
+Validating at point of use rather than at quirk-resolution time is deliberate —
+it holds regardless of how the value arrived, including a table patched at
+runtime, which is exactly what the test does.
 
 The download half (make dir → timestamp-prefix the name → `file_get().save()`) is
 factored into `_download(path, save_dir)`, shared with `bulb()`.
@@ -639,7 +665,7 @@ The quirk keys:
 |---|---|---|---|
 | `shot_gap` | min seconds between stills | `1.5` | `0.0` |
 | `capture_retry_attempts` | tries on a generic `GP_ERROR` | `2` | `1` |
-| `movie_widget` | config name of the movie toggle | `"movie"` | `"movie"` |
+| `movie_widget` | config name of the movie toggle | *(inherited)* | `"movie"` |
 | `af_widget` | config name of the AF-drive action | `"autofocus"` | `"autofocusdrive"` |
 | `af_drive_values` | value sequence written to `af_widget` per trigger | `(1, 0)` (press/release) | `(1,)` |
 | `manual_focus_widget` | config name of the manual-focus-drive action | `"manualfocus"` | `"manualfocusdrive"` |
@@ -663,6 +689,33 @@ fallback — because a *silent* fallback to generic widget names is exactly what
 made the focus `-2` so hard to find. If focus misbehaves on a new body, that
 warning line is the first thing to check.
 
+**A vendor table layers over the defaults; it does not replace them.**
+`_layered_over_defaults` returns `{**DEFAULT_QUIRKS, **vendor_table}`, so a
+vendor declares only what actually differs and inherits the rest — which is why
+`movie_widget` reads *(inherited)* above: Sony agrees with the default, so
+`sony.GENERAL` no longer says so. Before this (TODO #13), the vendor dict was
+returned as-is, every vendor had to repeat all 16 keys, and an omission was a
+`KeyError` raised deep inside a request handler, months later, on someone else's
+camera — no error at import, nothing at review time. The duplication was also
+measurably going wrong on its own: the table grew from 13 keys to 16 during the
+magnifier work and every new key had to be written twice.
+
+Two consequences worth knowing before adding a vendor:
+
+- **A key the defaults don't define is refused**, loudly, with a `ValueError`
+  naming the module and the key. A typo like `af_widgets` would otherwise be
+  merged in silently, sit in the table doing nothing, and present as "the
+  feature just doesn't work on this body." This fires when the quirks resolve —
+  i.e. at `connect()` — so a bad vendor module means the camera never connects
+  rather than half-working. That is deliberate: it is a programming error, the
+  shipped vendors are covered by `test_gp2_helpers.QuirkResolution`, and the
+  people who can hit it are the people editing a vendor file.
+- **The unmatched path still returns `DEFAULT_QUIRKS` itself**, not a copy. That
+  identity *is* the "no vendor claimed this body" signal, and
+  `test_fake_fidelity` reads it that way (`quirks is not gp2.DEFAULT_QUIRKS`).
+  The matched path returns a fresh dict, so layering never mutates the shared
+  table.
+
 **Every widget name in that table is checked against real hardware.** The dumps
 in `tests/fixtures/` are captured off actual bodies, and
 `test_fake_fidelity.EveryDumpedBodyMatchesItsQuirks` asserts that each name a
@@ -674,7 +727,9 @@ why the *target* modes are asserted strictly while `af_modes` / `mf_modes` are
 only required to overlap.
 
 **Adding a vendor:** create a module exposing a `quirks(model)` function with the
-same contract and append it to `VENDORS`. **Adding a model to an existing
+same contract and append it to `VENDORS`. Declare only the keys that differ from
+`DEFAULT_QUIRKS` — the rest are inherited, and naming a key that does not exist
+is refused at connect time. **Adding a model to an existing
 vendor:** add an entry to that vendor's `MODELS` keyed by a distinctive substring
 of the *reported* model string (check it with `GET /api/status` or
 `get_abilities().model` — don't assume the internal name); an empty dict means

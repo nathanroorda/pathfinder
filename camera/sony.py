@@ -1,7 +1,6 @@
 GENERAL = {
     "shot_gap": 1.5,
     "capture_retry_attempts": 2,
-    "movie_widget": "movie",
     "af_widget": "autofocus",
     "af_drive_values": (1, 0),
     "manual_focus_widget": "manualfocus",

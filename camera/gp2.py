@@ -199,7 +199,8 @@ class Gphoto2Camera:
                     "draining events failed: %r", exc)
 
     def _capture_with_retry(self):
-        attempts = self._quirks["capture_retry_attempts"]
+        attempts = _at_least_one("capture_retry_attempts",
+                                 self._quirks["capture_retry_attempts"])
         for i in range(attempts):
             try:
                 return self._cam.capture(gp.GP_CAPTURE_IMAGE)
@@ -283,7 +284,9 @@ class Gphoto2Camera:
             return self._settled_magnifier(level)
 
     def _settled_magnifier(self, level):
-        for attempt in range(MAGNIFIER_SETTLE_ATTEMPTS):
+        attempts = _at_least_one("MAGNIFIER_SETTLE_ATTEMPTS",
+                                 MAGNIFIER_SETTLE_ATTEMPTS)
+        for attempt in range(attempts):
             if attempt:
                 time.sleep(MAGNIFIER_SETTLE_DELAY)
             state = self._read_magnifier()
@@ -291,7 +294,7 @@ class Gphoto2Camera:
                 return state
         log.warning("magnifier still reads %r after %d reads, %r was accepted — "
                     "reporting what the body says, not what was asked",
-                    state["value"], MAGNIFIER_SETTLE_ATTEMPTS, level)
+                    state["value"], attempts, level)
         return state
 
     def _read_magnifier(self):
@@ -325,17 +328,18 @@ class Gphoto2Camera:
         self._cam.set_single_config(widget_name, widget)
 
     def _release_action(self, widget_name, value):
-        for attempt in range(RELEASE_ATTEMPTS):
+        attempts = _at_least_one("RELEASE_ATTEMPTS", RELEASE_ATTEMPTS)
+        for attempt in range(attempts):
             try:
                 return self._drive_action(widget_name, value)
             except Exception as exc:
                 failure = exc
                 log.warning("release %s=%r failed (attempt %d/%d): %r",
-                            widget_name, value, attempt + 1, RELEASE_ATTEMPTS, exc)
-                if attempt < RELEASE_ATTEMPTS - 1:
+                            widget_name, value, attempt + 1, attempts, exc)
+                if attempt < attempts - 1:
                     time.sleep(RELEASE_RETRY_DELAY)
         log.error("could not release %s after %d attempts — the body may still "
-                  "be latched", widget_name, RELEASE_ATTEMPTS)
+                  "be latched", widget_name, attempts)
         raise failure
 
     def list_settings(self):
@@ -431,6 +435,12 @@ def _value(widget):
         return None
 
 
+def _at_least_one(name, count):
+    if count < 1:
+        raise ValueError(f"{name} must be at least 1, got {count!r}")
+    return count
+
+
 def _scale(fraction, size):
     return int(round(min(1.0, max(0.0, float(fraction))) * size))
 
@@ -470,11 +480,19 @@ def _quirks_for(model):
         q = vendor.quirks(model)
         if q is not None:
             log.info("matched vendor quirks for model %r", model)
-            return q
+            return _layered_over_defaults(q, vendor)
     log.warning(
         "no vendor quirks matched model %r — using generic defaults; "
         "vendor-specific actions (focus, etc.) may not work", model)
     return DEFAULT_QUIRKS
+
+
+def _layered_over_defaults(quirks, vendor):
+    unknown = set(quirks) - set(DEFAULT_QUIRKS)
+    if unknown:
+        raise ValueError(f"{vendor.__name__} declares quirks that do not exist: "
+                         f"{', '.join(sorted(unknown))}")
+    return {**DEFAULT_QUIRKS, **quirks}
 
 
 def connect():
