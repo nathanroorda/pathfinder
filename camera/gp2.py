@@ -341,7 +341,7 @@ class Gphoto2Camera:
     def list_settings(self):
         with self._bus("list_settings"):
             self._require_open()
-            return [_describe(w) for w in _settable_widgets(self._cam.get_config())]
+            return [_describe(w) for w in _listable_widgets(self._cam.get_config())]
 
     def set_setting(self, name, value):
         with self._bus("set_setting"):
@@ -372,13 +372,25 @@ def _walk(widget):
     return result
 
 
-def _settable_widgets(config):
+def _listable_widgets(config):
     for section in config.get_children():
         if section.get_name() not in INCLUDE_SECTIONS:
             continue
         for widget in _walk(section):
-            if widget.get_type() in _KIND and not widget.get_readonly():
+            if widget.get_type() in _KIND and _worth_showing(widget):
                 yield widget
+
+
+def _worth_showing(widget):
+    if not widget.get_readonly():
+        return True
+    return _KIND.get(widget.get_type()) == "choice" and widget.count_choices() > 0
+
+
+def _settable_widgets(config):
+    for widget in _listable_widgets(config):
+        if not widget.get_readonly():
+            yield widget
 
 
 def _settable_widget(config, name):
@@ -394,7 +406,8 @@ def _describe(widget):
         "name": widget.get_name(),
         "label": widget.get_label(),
         "type": kind,
-        "value": widget.get_value(),
+        "value": _value(widget),
+        "readonly": bool(widget.get_readonly()),
     }
     if kind == "choice":
         info["choices"] = _choices(widget)
@@ -404,15 +417,18 @@ def _describe(widget):
 
 
 def _describe_status(widget):
-    try:
-        value = widget.get_value()
-    except gp.GPhoto2Error:
-        value = None
     return {
         "name": widget.get_name(),
         "label": widget.get_label(),
-        "value": value,
+        "value": _value(widget),
     }
+
+
+def _value(widget):
+    try:
+        return widget.get_value()
+    except gp.GPhoto2Error:
+        return None
 
 
 def _scale(fraction, size):

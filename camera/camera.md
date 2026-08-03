@@ -468,38 +468,92 @@ this guard rarely fires — it's the backstop for a direct API hit).
 This is what makes the UI camera-agnostic. Rather than hardcoding controls,
 Pathfinder reflects whatever the connected body exposes:
 
-- **`_settable_widgets(config)`** is the single definition of "a setting": it
-  walks the camera's config tree from `get_config()`, recursing through
-  `WINDOW`/`SECTION` container nodes (`_walk`) and yielding only leaf widgets
-  that are (a) under one of `INCLUDE_SECTIONS`
-  = `{imgsettings, capturesettings, settings}`, (b) of a type Pathfinder knows
-  how to render, and (c) not read-only.
-- **`list_settings()`** turns each of those into a plain descriptor dict by
-  `_describe`.
+There are **two** surfaces here, one nested inside the other, and keeping them
+distinct is the whole design:
+
+- **`_listable_widgets(config)`** defines what the panel *shows*. It walks the
+  camera's config tree from `get_config()`, recursing through `WINDOW`/`SECTION`
+  container nodes (`_walk`) and yielding leaf widgets that are (a) under one of
+  `INCLUDE_SECTIONS` = `{imgsettings, capturesettings, settings}`, (b) of a
+  type Pathfinder knows how to render, and (c) `_worth_showing`.
+- **`_worth_showing(widget)`** is the rule for read-only widgets, and it exists
+  because "show everything read-only" produced rows that meant nothing. A
+  writable widget is always shown. A read-only one is shown **only if it is a
+  choice that offers choices** — see below.
+- **`_settable_widgets(config)`** defines what may be *written*: the same
+  generator, minus anything the body reports read-only. It is one filter over
+  the other, so the write surface cannot drift wider than the read surface by
+  construction — it is a strict subset by definition, not by discipline.
+- **`list_settings()`** turns every *listable* widget into a plain descriptor
+  dict by `_describe`, each carrying a `readonly` flag.
 - **`set_setting(name, value)`** resolves the name through `_settable_widget`
-  against that *same* generator, coerces `value` to the type gphoto2 expects for
-  that widget kind (`_coerce`), and writes it back with `set_config()`. A name
-  outside the allowlist raises `KeyError`, which `app/app.py` maps to **404**.
-  Having one definition shared by both paths is the point: they previously
-  drifted, and `set_setting` resolved names against the *whole* tree — so
-  `POST /api/settings/bulb` reached the shutter release through an endpoint that
-  is supposed to be inert (TODO #6, fixed and verified 2026-07-25). On the α7 IV
-  this scoping takes the writable surface from every widget in the tree down to
-  the 20 `choice` widgets the listing offers.
+  against the *settable* generator, coerces `value` to the type gphoto2 expects
+  for that widget kind (`_coerce`), and writes it back with `set_config()`. A
+  name outside that allowlist raises `KeyError`, which `app/app.py` maps to
+  **404**. That the read path is deliberately wider is the one thing to hold on
+  to when changing this: `set_setting` resolving names against the *whole* tree
+  is exactly how `POST /api/settings/bulb` once reached the shutter release
+  through an endpoint that is supposed to be inert (TODO #6, fixed and verified
+  2026-07-25). Widening the *listing* is safe; widening `_settable_widgets` is
+  how that regression comes back. On the α7 IV the listing offers 28 rows and
+  the writable surface is 20 of them.
+
+**Why read-only widgets are shown rather than filtered out.** They used to be
+dropped, which meant a control the body owns right now was indistinguishable
+from a control the body does not have. On the α7 IV that hid 8 widgets —
+including `f-number` and `shutterspeed`, which the driver reports read-only
+whenever the mode dial leaves the body in charge of them (in `P`, both). The
+settings panel simply had no aperture row and no shutter row, with nothing to
+say why. The same shape made an MTP/Mass-Storage connection (TODO #20) present
+as an ambiguously empty panel.
+
+**Why only read-only *choices*, though.** The first cut showed every read-only
+widget and produced three rows a user reported as nonsense, all of them
+`RANGE`:
+
+| widget | advertised range | reported value |
+|---|---|---|
+| `colortemperature` | 2500..9900 | `0` — impossible; the body is not in a colour-temperature white-balance mode |
+| `focalposition` | 0..100 | `255` — impossible; the classic `0xFF` "unknown" sentinel |
+| `zoom` | 0..4294.97 | `80.768` — in range, but a lens-position readout, not a setting |
+
+A read-only `RANGE` is a **number, rendered as a slider you cannot move**. It
+communicates nothing a readout wouldn't, and two of the three above are not even
+a valid position within their own bounds — the driver's way of saying "not
+applicable right now". A read-only *choice* is different: it shows both the
+current selection and the full option set the body offers (every aperture the
+lens has, every shutter speed), which is genuinely informative and is the whole
+reason the aperture/shutter rows are worth rendering. Hence the rule: read-only
+is shown when it is a choice with a non-empty choice list, and hidden otherwise.
+Read-only `TOGGLE`/`TEXT` fall out on the same reasoning. If such a readout is
+wanted later, it belongs in `telemetry()`, not here — see TODO #52, which is
+about widening telemetry for exactly this class of value.
+
+`tests/test_fake_fidelity.py` pins all of it against the real dump: the two
+exposure controls appear flagged read-only, the three readouts above are absent,
+two of them are asserted to report a value their own range forbids (so a future
+dump that changes this fails loudly rather than silently), and every
+listed-but-not-settable name still raises `KeyError` at `_settable_widget`.
 - **`telemetry()`** is the read-only counterpart: it walks the same config tree
   but keeps leaf widgets under `STATUS_SECTIONS` = `{status}` — the battery,
   frames-remaining, model, serial, and lens fields the body reports but you don't
   edit. The two surfaces cannot overlap, and the reason is the **section split**,
   not the read-only filter: `status` is not in `INCLUDE_SECTIONS`, so a status
-  widget never reaches `_settable_widgets`' filters at all. Worth being precise
+  widget never reaches `_listable_widgets`' filters at all. Worth being precise
   about, because the guarantee is stronger than "they happen to be read-only" —
   a body that advertised a *writable* widget in its `status` section would still
-  be kept out of the settings panel. Each is reduced to a
+  be kept out of the settings panel. **This is now the only thing keeping the
+  two apart.** While read-only widgets were filtered out of the listing, the
+  read-only filter looked like a second line of defence; it never was, and now
+  it visibly isn't. Each status widget is reduced to a
   bare `{name, label, value}` by `_describe_status` (no `type`/`choices`/`range`,
-  since nothing renders them as editable controls). Reading an individual status
-  widget's value can fail on some bodies — a prop the driver advertises but can't
-  poll — so `_describe_status` swallows that `GPhoto2Error` and reports `value:
-  None` rather than letting one bad widget sink the whole panel.
+  since nothing renders them as editable controls). Reading an individual
+  widget's value can fail on some bodies — a prop the driver advertises but
+  can't poll — so both descriptors read through `_value`, which swallows that
+  `GPhoto2Error` and reports `value: None` rather than letting one bad widget
+  sink the whole panel. `_describe` shares it because the listing now includes
+  widgets whose values were never read before, and a read-only widget is a
+  plausible place for that failure to appear.
 
 The type mapping (`_KIND`) collapses gphoto2's widget types into four render
 kinds — this is the vocabulary the frontend renders against:
@@ -521,10 +575,13 @@ correcting a caller hides a client bug. `NaN` is **rejected** with `ValueError`
 would have driven the widget to one end of its travel. Step *granularity* is not
 enforced — an off-grid value on a step-1 widget is still sent as-is.
 
-Every descriptor carries `name`, `label`, `type`, and `value`. This shape is the
-**contract with the frontend** — `web/script.js` renders a control purely from
-these fields and knows nothing about gphoto2. It's documented from the consumer
-side in **`web.md`**; keep the two in sync if you extend `_describe`.
+Every descriptor carries `name`, `label`, `type`, `value`, and `readonly`. This
+shape is the **contract with the frontend** — `web/script.js` renders a control
+purely from these fields and knows nothing about gphoto2. It's documented from
+the consumer side in **`web.md`**; keep the two in sync if you extend
+`_describe`. `readonly` is a real `bool` rather than the binding's `0`/`1`, so
+the browser can test it directly and it survives JSON without a truthiness
+question.
 
 ## Disconnect classification — `is_disconnect_error()` and `_DISCONNECT_CODES`
 

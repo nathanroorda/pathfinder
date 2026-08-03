@@ -714,8 +714,8 @@ class ListSettings(CameraTestCase):
 
     def test_returns_the_user_facing_sections_only(self):
         self.assertEqual(self.names(),
-                         ["iso", "whitebalance", "f-number", "burstnumber",
-                          "focusmode", "datetime"])
+                         ["iso", "whitebalance", "imagequality", "f-number",
+                          "burstnumber", "focusmode", "datetime"])
 
     def test_action_widgets_are_never_exposed_as_settings(self):
         for hidden in ("bulb", "movie", "autofocus", "manualfocus",
@@ -725,8 +725,17 @@ class ListSettings(CameraTestCase):
     def test_status_widgets_are_not_settings(self):
         self.assertNotIn("batterylevel", self.names())
 
-    def test_readonly_widgets_are_omitted(self):
-        self.assertNotIn("imagequality", self.names())
+    def test_readonly_choices_are_listed_so_the_panel_can_show_them(self):
+        self.assertIn("imagequality", self.names())
+
+    def test_readonly_ranges_are_omitted_because_a_dead_slider_says_nothing(self):
+        self.assertNotIn("colortemperature", self.names())
+
+    def test_every_row_says_whether_it_can_be_written(self):
+        flags = {s["name"]: s["readonly"] for s in self.cam.list_settings()}
+
+        self.assertIs(flags["imagequality"], True)
+        self.assertIs(flags["iso"], False)
 
     def test_unrenderable_widget_types_are_omitted(self):
         self.assertNotIn("liveviewsize", self.names())
@@ -780,17 +789,28 @@ class SetSetting(CameraTestCase):
         with self.assertRaises(KeyError):
             self.cam.set_setting("imagequality", "JPEG")
 
-    def test_every_listed_setting_is_writable(self):
+    def test_every_writable_row_in_the_listing_is_writable(self):
         for setting in self.cam.list_settings():
+            if setting["readonly"]:
+                continue
             with self.subTest(name=setting["name"]):
                 self.cam.set_setting(setting["name"], setting["value"])
+
+    def test_every_readonly_row_in_the_listing_is_refused(self):
+        readonly = [s for s in self.cam.list_settings() if s["readonly"]]
+
+        self.assertTrue(readonly, "the fake must publish one, or this is vacuous")
+        for setting in readonly:
+            with self.subTest(name=setting["name"]):
+                with self.assertRaises(KeyError):
+                    self.cam.set_setting(setting["name"], setting["value"])
 
     def test_nothing_outside_the_listing_is_writable(self):
         listed = {s["name"] for s in self.cam.list_settings()}
 
         for name in ("bulb", "movie", "autofocus", "autofocusdrive",
                      "manualfocus", "manualfocusdrive", "spotfocusarea",
-                     "batterylevel", "lensname", "imagequality",
+                     "batterylevel", "lensname",
                      "liveviewsize", "no-such-widget"):
             with self.subTest(name=name):
                 self.assertNotIn(name, listed)

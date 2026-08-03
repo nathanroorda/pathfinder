@@ -243,6 +243,44 @@ class TheFixtureIsARealDump(unittest.TestCase):
         self.assertNotIn("shutterspeed", listed)  # ro on this body
         self.assertNotIn("f-number", listed)      # ro on this body
 
+    def test_the_panel_shows_the_exposure_controls_the_body_reports_read_only(self):
+        described = {w.get_name(): gp2._describe(w)
+                     for w in gp2._listable_widgets(self.config)}
+
+        for name in ("shutterspeed", "f-number"):
+            with self.subTest(name=name):
+                self.assertIs(described[name]["readonly"], True)
+
+        self.assertIs(described["iso"]["readonly"], False)
+
+    def test_showing_read_only_rows_did_not_widen_the_writable_surface(self):
+        listable = {w.get_name() for w in gp2._listable_widgets(self.config)}
+        settable = {w.get_name() for w in gp2._settable_widgets(self.config)}
+
+        self.assertEqual(len(listable), 25)
+        self.assertEqual(len(settable), 20)
+        for name in listable - settable:
+            with self.subTest(name=name):
+                with self.assertRaises(KeyError):
+                    gp2._settable_widget(self.config, name)
+
+    def test_the_read_only_readouts_are_hidden_not_shown_as_dead_sliders(self):
+        listable = {w.get_name() for w in gp2._listable_widgets(self.config)}
+
+        for name in ("colortemperature", "zoom", "focalposition"):
+            with self.subTest(name=name):
+                widget = self.config.find(name)
+                self.assertTrue(widget.get_readonly())
+                self.assertEqual(gp2._KIND[widget.get_type()], "range")
+                self.assertNotIn(name, listable)
+
+    def test_two_of_those_report_a_value_their_own_range_forbids(self):
+        for name in ("colortemperature", "focalposition"):
+            with self.subTest(name=name):
+                widget = self.config.find(name)
+                low, high, _ = widget.get_range()
+                self.assertFalse(low <= float(widget.get_value()) <= high)
+
     def test_parsing_a_dump_with_no_widget_blocks_is_an_error(self):
         with self.assertRaises(ValueError):
             dump.build_config("Camera summary:\nnothing here\n")

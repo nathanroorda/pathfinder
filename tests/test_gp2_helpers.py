@@ -178,7 +178,7 @@ class Describe(unittest.TestCase):
                             label="ISO Speed", choices=("100", "400", "800"))
         self.assertEqual(gp2._describe(widget), {
             "name": "iso", "label": "ISO Speed", "type": "choice",
-            "value": "400", "choices": ["100", "400", "800"],
+            "value": "400", "choices": ["100", "400", "800"], "readonly": False,
         })
 
     def test_menu_is_also_a_choice(self):
@@ -199,10 +199,51 @@ class Describe(unittest.TestCase):
             with self.subTest(kind=kind):
                 described = gp2._describe(FakeWidget("w", wtype, value=1))
                 self.assertEqual(described["type"], kind)
-                self.assertEqual(set(described), {"name", "label", "type", "value"})
+                self.assertEqual(set(described),
+                                 {"name", "label", "type", "value", "readonly"})
+
+    def test_readonly_is_reported_as_a_bool_the_browser_can_test(self):
+        widget = FakeWidget("shutterspeed", gp.GP_WIDGET_RADIO, value="1/30",
+                            choices=("1/30",), readonly=True)
+        self.assertIs(gp2._describe(widget)["readonly"], True)
+
+    def test_a_widget_whose_value_cannot_be_read_still_describes(self):
+        widget = FakeWidget("broken", gp.GP_WIDGET_TEXT, value="x",
+                            value_error=gp.GPhoto2Error(gp.GP_ERROR_NOT_SUPPORTED))
+        self.assertIsNone(gp2._describe(widget)["value"])
 
     def test_every_kind_the_browser_renders_is_producible(self):
         self.assertEqual(set(gp2._KIND.values()), {"choice", "toggle", "range", "text"})
+
+
+class WorthShowing(unittest.TestCase):
+    def test_a_writable_widget_of_any_kind_is_shown(self):
+        for wtype in gp2._KIND:
+            with self.subTest(wtype=wtype):
+                widget = FakeWidget("w", wtype, value=1, choices=("a",),
+                                    rng=(0.0, 1.0, 1.0))
+                self.assertTrue(gp2._worth_showing(widget))
+
+    def test_a_readonly_choice_is_shown_because_it_has_a_value_and_options(self):
+        widget = FakeWidget("f-number", gp.GP_WIDGET_RADIO, value="f/3.5",
+                            choices=("f/3.5", "f/4"), readonly=True)
+        self.assertTrue(gp2._worth_showing(widget))
+
+    def test_a_readonly_range_is_hidden(self):
+        widget = FakeWidget("colortemperature", gp.GP_WIDGET_RANGE, value=0.0,
+                            rng=(2500.0, 9900.0, 100.0), readonly=True)
+        self.assertFalse(gp2._worth_showing(widget))
+
+    def test_a_readonly_choice_offering_nothing_is_hidden(self):
+        widget = FakeWidget("empty", gp.GP_WIDGET_RADIO, value="",
+                            choices=(), readonly=True)
+        self.assertFalse(gp2._worth_showing(widget))
+
+    def test_a_readonly_toggle_or_text_is_hidden(self):
+        for wtype in (gp.GP_WIDGET_TOGGLE, gp.GP_WIDGET_TEXT):
+            with self.subTest(wtype=wtype):
+                widget = FakeWidget("w", wtype, value=1, readonly=True)
+                self.assertFalse(gp2._worth_showing(widget))
 
 
 class DescribeStatus(unittest.TestCase):

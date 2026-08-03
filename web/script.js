@@ -304,16 +304,26 @@ const settingRenderers = {
   },
 };
 
+function disableControl(element) {
+  if (element.matches("select, input, button")) element.disabled = true;
+  for (const child of element.querySelectorAll("select, input, button")) child.disabled = true;
+}
+
 function renderSettings(settings) {
   settingsEl.replaceChildren();
   for (const setting of settings) {
     const render = settingRenderers[setting.type];
     if (!render) continue;
     const row = document.createElement("div");
-    row.className = "setting";
+    row.className = setting.readonly ? "setting readonly" : "setting";
     const label = document.createElement("label");
     label.textContent = setting.label;
-    row.append(label, render(setting, (value) => applySetting(setting.name, value)));
+    const apply = setting.readonly
+      ? () => {}
+      : (value) => applySetting(setting.name, value);
+    const control = render(setting, apply);
+    if (setting.readonly) disableControl(control);
+    row.append(label, control);
     settingsEl.append(row);
   }
 }
@@ -335,6 +345,7 @@ async function applySetting(name, value) {
     }));
   } catch (e) {
     resultEl.textContent = `Setting failed: ${e.message}`;
+    loadSettings();
   }
 }
 

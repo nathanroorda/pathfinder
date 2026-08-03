@@ -244,6 +244,46 @@ rather than a broken row. The `range` control updates its `<output>` on every
 `input` event for live feedback but only `apply`s on `change`, so the backend
 isn't hammered with a write per pixel of slider drag.
 
+A descriptor whose `readonly` is true is built by the *same* renderer, but with
+a **no-op `apply`**, and is then passed to `disableControl()` (which sets
+`disabled` on the control, or for `range` on the inputs inside its wrapper
+`<div>`). The row also gets a `readonly` class, which `style.css` dims. The row
+still shows the camera's current value, which is the point of rendering it.
+
+Two independent guards, deliberately: `disabled` means the control fires no
+`change`/`click`, and the no-op `apply` means that even if a handler *did* fire
+— a stale cached `script.js`, a future renderer that forgets to disable
+something — there is no path from a read-only row to `applySetting`. The
+backend refuses these names with **404** regardless, so this is the third layer;
+belt and braces are cheap here because the failure is user-visible and looks
+like a broken app rather than a protected one.
+
+`applySetting` also calls `loadSettings()` when a write fails. Writability is
+camera **state**, not a fixed property — the same widget can be writable in `M`
+and read-only in `P` — so a refused write usually means the panel's picture of
+the body is out of date. Re-reading resyncs it instead of leaving a control
+showing something the body never accepted, the same reasoning as the magnifier's
+`loadMagnifier()` on error.
+
+This is why the panel is not simply "the things you can change". On the α7 IV,
+`f-number` and `shutterspeed` are reported read-only whenever the mode dial
+leaves the body in charge of them — in `P`, both are. Filtering them out gave a
+panel with no aperture and no shutter row and no explanation, indistinguishable
+from a camera that doesn't have them. Rendering them disabled makes the state
+legible: the control is there, it shows what the camera is doing, and it is
+visibly not yours to set right now. The browser must not treat `readonly` as
+advice — the backend refuses these names with **404** regardless (see
+`app/app.md`); the flag exists so the UI doesn't offer an edit that would fail.
+
+Not every read-only widget earns a row, and the browser never has to decide
+which: `gp2._worth_showing` keeps them out of the response entirely, so a
+descriptor arriving here is already worth rendering. The rule and the three α7 IV
+widgets that motivated it (`colortemperature`, `zoom`, `focalposition` — all
+read-only ranges, two reporting values their own bounds forbid) are documented in
+**`camera.md`**. The short version for frontend purposes: a read-only *choice*
+shows a value and the options behind it; a read-only *range* is a slider you
+can't move, which is why none reach this code.
+
 Every control's change handler calls `applySetting(name, value)`, which `POST`s to
 `/api/settings/{name}` with `{value}`. Crucially, the backend responds with the
 **full, re-read settings list**, and `applySetting` renders that response — so if
@@ -264,9 +304,14 @@ Pure presentation, a few intentional choices worth noting:
   scale(.98) }` gives tactile press feedback on touch.
 - **State is driven by classes/attributes the script toggles**:
   `.status.connected`/`.status.offline`, `#record.recording` (turns the button
-  red), `button:disabled` (dims it), and `.toggle[data-on="1"]` (green when on).
+  red), `button:disabled` (dims it), `.setting.readonly` (dims a whole settings
+  row the body reports read-only), and `.toggle[data-on="1"]` (green when on).
   The CSS never queries the DOM — it just styles whatever state `script.js` has
   set, keeping the two loosely coupled.
+- **`.setting.readonly` dims to `.55`, not the `.4` used for disabled buttons.**
+  A disabled button has nothing to say; a read-only settings row exists
+  precisely so its *value* can still be read at a glance, so it is dimmed enough
+  to read as inert and no further.
 - The `range` `<output>` uses `font-variant-numeric: tabular-nums` so the live
   value doesn't jitter horizontally as digits change.
 - **`.liveview`** is a fixed `aspect-ratio: 3 / 2` box (matching the α7 IV

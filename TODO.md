@@ -31,8 +31,8 @@ today:
 |---|---|---|---|---|
 | `/main/actions` | 8 | 8 | **7** — all but `opcode` | `opcode` excluded on purpose (raw PTP); see #54 |
 | `/main/settings` | 2 | 2 | 2 | — |
-| `/main/imgsettings` | 4 | 3 | 3 | 1 read-only widget is hidden rather than shown (#56) |
-| `/main/capturesettings` | 22 | 15 | 15 | 7 read-only widgets hidden, **including aperture and shutter speed** (#50, #56) |
+| `/main/imgsettings` | 4 | 3 | **4** (1 shown read-only) | — |
+| `/main/capturesettings` | 22 | 15 | **22** (7 shown read-only) | aperture and shutter speed are visible but not writable in `P` (#50) |
 | `/main/status` | 7 | 0 | 7 (telemetry) | remaining-shots and lens are **not here** (#52) |
 | `/main/other` | 346 | 156 | **0** | ~30 carry real labels, **14 with no named equivalent** (#51); ~13 more are the modern Sony remote-control actions (#55); the rest are raw aliases or `PTP Property 0xNNNN` |
 
@@ -46,18 +46,15 @@ other writable properties live (#51).
 Two claims in the v1 document are **not currently true of the code**, and both
 are cheap to settle:
 
-- **Aperture and shutter speed never appear in the settings panel.** In the only
-  dump we have they are `Readonly: 1`, and `_settable_widgets` drops read-only
-  widgets — so the two controls the document names explicitly are absent from
-  the UI, silently. See #50; the likely cause is benign (the dump was taken in
-  **P**) but it has never been checked, and #56 is why nobody noticed.
+- **Aperture and shutter speed cannot be set.** In the only dump we have they
+  are `Readonly: 1`. Since #56 they at least *appear* in the panel as disabled
+  rows showing the body's current values, rather than being silently absent —
+  but they still can't be changed. See #50; the likely cause is benign (the dump
+  was taken in **P**) and is now one glance at the panel in **M** away from
+  being settled.
 - **"Shots remaining" and "lens" are not obtainable from `/main/status`.**
   Remaining shots is `/main/other/d249`; no lens property appears anywhere in
   the dump. See #52.
-
-A third, unrelated to the camera: **a provisioned device does not host its own
-WiFi on boot** (`AP_ON_BOOT` defaults to `0`), which the document's Feature 1
-and success criteria both assume. See #53.
 
 ---
 
@@ -766,9 +763,11 @@ and success criteria both assume. See #53.
   yields exactly the writable surface, and the α7 IV's healthy count is a
   measured 20 (see the coverage table at the top). A `connect()` that walks it
   once and refuses — or warns — on an empty result costs one config read on a
-  path that already does several. #56 makes the same failure visible in the UI
-  from the other direction: a panel showing read-only rows would be visibly
-  *empty* here rather than ambiguously empty.
+  path that already does several. #56 already made the same failure visible in
+  the UI from the other direction: now that the panel shows read-only rows too,
+  an MTP-mode body produces a visibly *empty* panel rather than an ambiguously
+  short one. Worth one look in that state before writing the connect-time check,
+  since the UI half may already be enough.
 - **Why it matters:** The user sees `Connected: <model>` with a blank settings
   panel and every button returning 400 — the single most confusing possible
   failure, and one every new user will hit at least once.
@@ -1055,14 +1054,12 @@ These are the places it's weaker than it looks.
   *is* in BULB —
   `curl -s localhost:8080/api/settings | python3 -m json.tool | grep -iE -A6 '"(shutterspeed|expprogram|exposuremode)"'`
   run once in P and once in BULB.
-- ⚠️ **The discovery command above will return nothing for `shutterspeed` as
-  written** (found 2026-08-03). In the checked-in dump
-  `/main/capturesettings/shutterspeed` is `Readonly: 1`, and `list_settings`
-  drops read-only widgets — so `/api/settings` does not contain it at all, in
-  any mode. Read it with `gphoto2 --get-config shutterspeed` with the service
-  stopped, or land #56 first (which makes read-only widgets visible and turns
-  this one-off into an ordinary UI observation). Same correction applies to
-  `expprogram`'s neighbours: `expprogram` itself *is* writable and does appear.
+- ✅ **The discovery command above works again as of #56** (2026-08-03). It
+  would have returned nothing for `shutterspeed`: that widget is `Readonly: 1`
+  on this body and `list_settings` used to drop read-only widgets, so
+  `/api/settings` did not contain it in any mode. Now that read-only rows are
+  listed, the `curl` reads it as written — just note the row will carry
+  `"readonly": true` in `P`.
 - **Useful prior from the dump:** `expprogram` reads `P` in the checked-in
   fixture, confirming that dump — and therefore the void run under #3 — was
   taken with the dial in **P**. When you re-dump in M + BULB, capture the whole
@@ -1403,23 +1400,25 @@ hole, and choosing them was correct. But they are now the *only* thing deciding
 what "full control" means, they were never revisited against the requirement,
 and three of the four items below are consequences of that one pair of sets.
 
-### 50. 🟠 Aperture and shutter speed never appear in the settings panel
+### 50. 🟠 Aperture and shutter speed cannot be set
 
-- **Where:** `camera/gp2.py:375-381` (`_settable_widgets`, the
-  `not widget.get_readonly()` filter), `tests/fixtures/ilce_7m4.txt`
+- **Where:** `camera/gp2.py` (`_settable_widgets`, the `not
+  widget.get_readonly()` filter), `tests/fixtures/ilce_7m4.txt`
 - **Issue:** In the checked-in dump, `/main/capturesettings/f-number`
   (`RADIO`, 17 choices, `f/3.5`) and `/main/capturesettings/shutterspeed`
-  (`RADIO`, 56 choices, `1/30`) are both **`Readonly: 1`**. `_settable_widgets`
-  drops read-only widgets, so neither is in `/api/settings`, so neither is in
-  the UI. The `/main/other` aliases are read-only too (`5007` F-Number, `d20d`
+  (`RADIO`, 56 choices, `1/30`) are both **`Readonly: 1`**, so neither can be
+  written. The `/main/other` aliases are read-only too (`5007` F-Number, `d20d`
   Shutter speed), so there is no second path to them either.
+- **Partially addressed by #56 (2026-08-03).** They are no longer *invisible* —
+  the panel now renders both as disabled rows showing the body's current
+  values. That fixes the diagnosis problem, not the capability: the item stays
+  open until a write is possible or is shown to be impossible.
 - **Why it matters:** `documentation/pathfinder_v1.tex` Feature 6 promises
   *"Full exposure control from the phone"* and Example Use Case 4 has the
   operator adjusting *"ISO, aperture, and shutter speed from the phone"*. ISO
   and exposure compensation are genuinely there and writable. The other two
-  named controls are not in the product at all, and nothing in the UI says so —
-  they are simply missing rows. This is the single largest distance between the
-  document and the code.
+  named controls cannot be changed from the product at all. This is the single
+  largest distance between the document and the code.
 - **The likely explanation is benign, which is exactly why it needs checking.**
   The same dump has `/main/capturesettings/expprogram` reading **`P`**. In
   Program AE the body owns both aperture and shutter, so libgphoto2 reporting
@@ -1430,11 +1429,13 @@ and three of the four items below are consequences of that one pair of sets.
   one void verification round (#3). Do not write this off as "obviously fine";
   it is one dump away from being settled either way.
 - **Fix, in order:**
-  1. Re-dump in **M** (`tools/camera-dump.sh`) and compare the `Readonly` line
-     on both widgets. Batch with #38/#3 — same dial trip.
-  2. If they are writable in M: nothing to fix in the camera layer, but land
-     #56 so a user in P can *see* why the controls are inert instead of finding
-     the panel silently shorter.
+  1. Turn the dial to **M** with the panel open. Since #56 the two rows are
+     visible either way, so this is now a look rather than a dump diff: if they
+     go live, the item is answered on the spot. Take a `tools/camera-dump.sh`
+     anyway to pin it in the fixture. Batch with #38/#3 — same dial trip.
+  2. If they are writable in M: nothing to fix in the camera layer. Correct the
+     v1 document to say exposure control follows the mode dial, since "full
+     exposure control from the phone" will still overstate it in `P`.
   3. If they are still read-only in M: the write path is elsewhere (Sony's
      newer control properties, #55) and this becomes a real feature gap. Check
      `/main/settings/prioritymode` — it reads `Application` in the dump, which
@@ -1542,35 +1543,6 @@ and three of the four items below are consequences of that one pair of sets.
   Ship the two together; they are one mechanism with two filters. Then correct
   the v1 document's Feature 7 wording to whatever survives.
 
-### 53. 🟠 A provisioned device does not host its own WiFi on boot
-
-- **Where:** `tools/setup.sh:14` (`AP_ON_BOOT="${AP_ON_BOOT:-0}"`),
-  `tools/setup.sh:170-179`, `tools/setup.sh:126`
-  (`connection.autoconnect no`), `README.md:139`, `README.md:149`
-- **Issue:** `AP_ON_BOOT` **defaults to `0`**, so the finalize step leaves
-  `connection.autoconnect no` on the AP profile and prints "AP will NOT
-  auto-start". A device provisioned exactly as the README instructs comes up
-  after reboot with no Pathfinder network — it rejoins home WiFi, or nothing.
-- **Why it matters:** Both documents assume the opposite. `README.md:139`
-  presents `AP_ON_BOOT=0` as an opt-in development toggle ("create the AP
-  profile but don't auto-start it on boot"), which reads as a departure from
-  the default; `README.md:149` then says "After it finishes, reboot — the AP
-  and app both come up automatically." `documentation/pathfinder_v1.tex`
-  Feature 1 is *"The unit hosts a WiFi network named Pathfinder"* and the
-  "no app install, no internet" success criterion is recorded as **Met**. The
-  failure is silent, happens only after the operator has left, and looks like a
-  broken device rather than a configuration default.
-- **Fix:** default `AP_ON_BOOT=1` — the product's behaviour should be the
-  script's default, and the development case is the one that deserves the
-  explicit opt-out. Keep `AP_ON_BOOT=0` documented as that opt-out. If the
-  default is instead kept deliberately (e.g. to avoid stranding a Pi mid-
-  provisioning over SSH — a real concern, since bringing the AP up drops the
-  session), then say so in **both** documents and remove the "come up
-  automatically" line, because right now the code and the docs disagree and the
-  docs are what someone provisions from.
-- **Note:** this is the one requirement gap with no camera involvement, and the
-  cheapest to close.
-
 ### 54. 🟡 Action coverage is hardcoded per body — there is no action discovery
 
 - **Where:** `app/app.py:243-384` (one bespoke route per action),
@@ -1628,11 +1600,75 @@ and three of the four items below are consequences of that one pair of sets.
   assertion when the finding is about the driver rather than our code). No
   shutter needs to fire for most of these.
 
-### 56. 🟡 Read-only widgets are hidden rather than shown disabled
+### 56. ✅ FIXED — Read-only widgets are hidden rather than shown disabled
 
-- **Where:** `camera/gp2.py:375-381` (`_settable_widgets` drops them),
-  `camera/gp2.py:391-403` (`_describe` has no `readonly` field),
-  `web/script.js:307-319` (`renderSettings`)
+- **Status:** Fixed 2026-08-03. Unit-covered; **not yet seen on a real panel**,
+  which is the only thing left (see below).
+  `_listable_widgets(config)` is the new definition of what the panel *shows*
+  (section + renderable type); `_settable_widgets` is now one filter over it
+  (`not readonly`) and therefore a strict subset **by construction** rather than
+  by discipline. `_settable_widget` — the write allowlist from #6 — resolves
+  against the settable generator and is otherwise untouched, so the write
+  surface did not move. `_describe` gained `"readonly": bool(...)`, and
+  `renderSettings` builds the row with the same renderer, then passes it to
+  `disableControl()` and marks the row `.readonly` (dimmed to `.55` in
+  `style.css`, chosen over the `.4` used for buttons so the *value* stays
+  readable — that is the point of the row).
+- **Measured against the real dump:** the α7 IV listing goes from 20 rows to
+  **25**, the writable surface stays at **20**, and `f-number` and
+  `shutterspeed` now appear flagged `readonly: true` instead of being absent.
+- ⚠️ **First cut showed too much; corrected the same day after use on the rig.**
+  Listing *every* read-only widget put three meaningless rows in the panel, all
+  of them `RANGE`: `colortemperature` (range 2500..9900, value **0**),
+  `focalposition` (range 0..100, value **255** — a `0xFF` sentinel), and `zoom`
+  (a lens-position readout). Two additionally reported a 404 on interaction,
+  because a stale cached `script.js` rendered them live against a backend that
+  correctly refused the write. `_worth_showing` now keeps a read-only widget
+  only when it is a **choice with a non-empty choice list** — a read-only choice
+  shows a value *and* the options behind it, a read-only range is a slider you
+  cannot move. That is what took the listing from 28 to 25.
+  **Lesson: "show what was hidden" is not the same requirement as "show what is
+  worth showing",** and only the second one is a feature. The rig found it in
+  one session; no fixture assertion would have, because the values are all
+  perfectly well-formed — it takes a person looking at a panel to see that a
+  colour-temperature slider reading 0 is nonsense.
+- **Belt and braces on the write path, added with the correction:** a read-only
+  row is now built with a **no-op `apply`** as well as being `disabled`, so
+  there is no path from such a row to `applySetting` even if a renderer forgets
+  to disable something or a browser serves stale JS. `applySetting` also calls
+  `loadSettings()` on failure — writability is camera *state*, not a fixed
+  property, so a refused write usually means the panel is out of date.
+- **The #6 regression is pinned, not just avoided.** Two tests were *restated*
+  rather than deleted, which was the hazard called out when this was filed:
+  `SetSetting.test_every_writable_row_in_the_listing_is_writable` skips
+  read-only rows, and its new sibling
+  `test_every_readonly_row_in_the_listing_is_refused` asserts each one still
+  raises `KeyError` — with an `assertTrue(readonly)` guard so the test cannot
+  pass vacuously if the flag ever stops being emitted.
+  `test_fake_fidelity.test_showing_read_only_rows_did_not_widen_the_writable_surface`
+  does the same against real hardware output: every name in
+  `listable - settable` must still 404. Suite green: **345 tests**, up from 339.
+- **A second read-value hazard was closed on the way.** The listing now reads
+  values from widgets it never touched before, and `_describe` called
+  `get_value()` bare while `_describe_status` had long guarded it — evidence
+  that some bodies advertise props they cannot poll. Both now share `_value`,
+  so one unreadable read-only widget reports `value: null` instead of sinking
+  the whole settings panel.
+- **To verify on the rig:** load the panel with the dial in **P** and confirm
+  aperture and shutter speed are present, dimmed, showing the body's current
+  values, and untouchable. Then turn to **M** — if they become live controls,
+  #50 is answered in the affirmative on the spot, which is what this item was
+  sequenced ahead of the rig trip to enable. Also worth one look with the body
+  in MTP/Mass Storage (#20): the panel should now be *visibly* empty rather
+  than ambiguously so.
+- **Where:** `camera/gp2.py` (`_listable_widgets`, `_worth_showing`,
+  `_settable_widgets`, `_describe`, `_value`), `web/script.js`
+  (`disableControl`, `renderSettings`, `applySetting`), `web/style.css`
+  (`.setting.readonly`)
+- **Left open by this:** relevance that the *body* doesn't encode. The α7 IV
+  marks `colortemperature` read-only when white balance isn't a temperature
+  mode, so hiding it falls out for free — but nothing marks `jpegquality`
+  irrelevant when `imagequality` is RAW-only. See **#58**.
 - **Issue:** A widget the body reports read-only is filtered out of
   `/api/settings` entirely, so the UI cannot distinguish "this camera has no
   such control" from "this control exists and is currently not writable." On
@@ -1663,7 +1699,7 @@ and three of the four items below are consequences of that one pair of sets.
   `5e242fc`), `documentation/pathfinder_v1.tex:3`
 - **Issue:** `documentation/` is the only untracked path in the tree. The file
   is the source of the Version 1 scope statement, the feature claims and the
-  success-criteria table — i.e. the thing #50-#53 are measured against — and it
+  success-criteria table — i.e. the thing #50-#52 are measured against — and it
   exists on exactly one machine. Its own compile comment names a different
   filename than the file has (`pathfinder-v1-information-document.tex`).
 - **Fix:** commit it, and add `*.aux`/`*.log`/`*.out`/`*.toc`/`*.pdf` under
@@ -1671,13 +1707,46 @@ and three of the four items below are consequences of that one pair of sets.
   which will silently cover the LaTeX log too). Fix the filename in the header
   comment.
 - **While it's open,** three claims in it need edits once the items above land:
-  Feature 6's "full exposure control" (#50), Feature 7's "shots remaining, lens"
-  (#52), and the success-criteria row *"Setup for the operator — no app install,
-  no internet — Met"*, which is currently contingent on #53.
+  Feature 6's "full exposure control" (#50) and Feature 7's "shots remaining,
+  lens" (#52).
 
----
+### 58. 🟡 The panel has no notion of a setting being irrelevant right now
 
-## Suggested order
+- **Where:** `camera/gp2.py` (`_worth_showing`), `web/script.js`
+  (`renderSettings`)
+- **Issue:** #56 handles the cases the *body* tells us about: a widget the
+  driver marks read-only is either shown inert (a choice) or hidden (a range).
+  That covered `colortemperature`, which the α7 IV marks read-only whenever
+  white balance isn't a temperature mode. It does **not** cover settings that
+  stay writable while being meaningless in the current state — `jpegquality`
+  when `imagequality` is RAW-only is the clearest one, and the movie-format
+  settings behind #51 will add more. The panel presents them as ordinary live
+  controls, and changing one appears to work while affecting nothing.
+- **Why it matters:** This is the same class of confusion #56 fixed, arriving
+  by a different route. A control that does nothing is worse than a control
+  that is visibly unavailable, because the user has no way to tell the
+  difference between "I changed it and it didn't matter" and "I changed it and
+  the app is broken." It also compounds with #35: the panel already re-renders
+  wholesale after every write, so a dependency like this shows up as rows
+  silently changing under the user's finger.
+- **Why it is genuinely hard, and should not be guessed at:** the dependency
+  graph is per-body and undocumented. Hardcoding "jpegquality depends on
+  imagequality" is a quirk-table entry for one relationship on one camera, and
+  there are dozens. Two honest options, in increasing cost:
+  1. **Do nothing and rely on the driver.** Some bodies do flip the readonly
+     flag for dependent properties; the α7 IV does it for colour temperature.
+     Worth *measuring* first: set `imagequality` to RAW on the rig and re-dump,
+     and see whether `jpegquality` goes read-only. If it does, #56 already
+     covers this and the item closes for free. **Do this before anything else
+     here** — it is one dump and it may make the rest unnecessary.
+  2. **A per-vendor relevance map** (`{"jpegquality": ("imagequality", ("JPEG",
+     "RAW+JPEG"))}`), rendered as a disabled row when the dependency isn't
+     satisfied. Only worth building if (1) shows the driver won't tell us, and
+     it should land with #51's allowlist since both are vendor-table data about
+     the same widgets.
+- **Do not** solve this by hiding rows outright: a setting that vanishes when
+  another changes is more disorienting than one that greys out, and #35's
+  re-render already moves the panel around more than it should.
 
 **Done:** #1, #5, #6, #37, #45, #46, #48 (all verified on hardware except
 #45/#46, which are documentation-only). #48 leaves two follow-ups: **#49** (its
@@ -1692,8 +1761,7 @@ stream; #8 needs a `systemctl`/`kill -STOP` session on the Pi (it also needs
 the first two review passes is *reliability* work on features that exist.
 #50-#57 are *requirement* work — the distance between the code and what Version
 1 says it does. The reliability list is longer, but the requirement list is what
-someone reading `documentation/pathfinder_v1.tex` will find first, and #53 in
-particular is a shipped-device defect with a one-line fix.
+someone reading `documentation/pathfinder_v1.tex` will find first.
 
 **One rig trip settles an unusual amount.** The dial session below is currently
 blocking #2, #3, #38 *and* #50, and the same physical setup answers #17 and #55.
@@ -1705,10 +1773,6 @@ dumped in P", which is also what made #3's verification round void.
 Long Exposure NR on): verifying #2, #3, #38, and settling #50. Do the items
 below while it waits.
 
-0. **#53** — the AP doesn't come up on a provisioned device. One line, no
-   hardware, and it is the difference between a device that works out of the box
-   and one that appears dead. Do it first for the same reason you'd fix a power
-   rail before debugging a peripheral.
 1. **#49** — half done (the cheap half). What's left is the shared config
    snapshot, which subsumes **#19** and cuts a whole-tree read out of every
    write path. Worth scheduling deliberately rather than bolting on — and note
@@ -1718,10 +1782,8 @@ below while it waits.
    after it. Both are defects in the watchdog itself, and #39 is the one failure
    mode the `kill -STOP` test cannot reveal (it is armed by then). Cheap: an
    ordering change and a `try/except`.
-3. **#56** — show read-only widgets disabled. Small, self-contained, no
-   hardware, and it makes #50 and #20 visible instead of invisible. Landing it
-   *before* the rig trip means the M-mode check in #50 can be done by looking at
-   the phone rather than by diffing dumps.
+3. ✅ **#56** — done 2026-08-03. The M-mode check in #50 is now a look at the
+   phone rather than a dump diff.
 4. **#38** — refuse `bulb` when the body is not in BULB. Note the discovery
    command in that item needs correcting (see its ⚠️ bullet) or #56 landing
    first.
@@ -1746,11 +1808,21 @@ below while it waits.
 11. **#54, #55** — action discovery and the Sony control-property family. Both
     are really "what does the second body need", so they belong with the
     Canon/Nikon work rather than ahead of it.
-12. Everything else, opportunistically. #42-#44, #47 and #57 are all small and
+12. **#58** — settings that are writable but irrelevant. Step 1 of its fix is
+    one dump on the rig and may close it for nothing; do that with the #50 dial
+    trip, and only build the relevance map if the driver won't tell us.
+13. Everything else, opportunistically. #42-#44, #47 and #57 are all small and
     independent — good filler while hardware access is blocked.
 
 #13 and #34 each have an `@expectedFailure` acceptance test already written in
 `tests/test_known_gaps.py` — start there. #5's and #6's have been promoted into
-the main suite now that they pass. When picking up #56, re-read the test note in
-that item before touching `test_gp2_camera.py::SetSetting`: the round-trip
-assertion it changes is what keeps #6 closed.
+the main suite now that they pass.
+
+**A standing rule, learned from #56.** The read surface (`_listable_widgets`)
+and the write surface (`_settable_widgets`) are deliberately different sets, and
+the second is a filter over the first. Widening the listing is safe; widening
+the settable generator is how #6 comes back. Any change here must keep
+`SetSetting.test_every_readonly_row_in_the_listing_is_refused` and
+`test_fake_fidelity.test_showing_read_only_rows_did_not_widen_the_writable_surface`
+green — they exist to make that mistake loud. #51's `/main/other` allowlist is
+the next change that will touch both.

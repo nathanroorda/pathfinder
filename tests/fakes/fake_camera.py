@@ -271,6 +271,9 @@ def default_config():
                        label="WhiteBalance", choices=("Automatic", "Daylight")),
             FakeWidget("imagequality", gp.GP_WIDGET_RADIO, value="RAW",
                        choices=("RAW", "JPEG"), readonly=True),
+            FakeWidget("colortemperature", gp.GP_WIDGET_RANGE, value=0.0,
+                       label="Color Temperature", rng=(2500.0, 9900.0, 100.0),
+                       readonly=True),
         ]),
         FakeWidget("capturesettings", gp.GP_WIDGET_SECTION, children=[
             FakeWidget("f-number", gp.GP_WIDGET_RADIO, value="f/2.8",

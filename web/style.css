@@ -122,5 +122,8 @@ button:disabled { opacity: .4; cursor: default; }
 }
 .setting input[type="range"] { flex: 1 1 auto; margin: 0 .5rem; }
 .setting output { flex: 0 0 auto; min-width: 3rem; text-align: right; font-size: .9rem; font-variant-numeric: tabular-nums; }
+.setting.readonly { opacity: .55; }
+.setting.readonly select,
+.setting.readonly input { cursor: default; }
 .setting .toggle { width: auto; padding: .35rem .8rem; font-size: .85rem; border-radius: .5rem; }
 .setting .toggle[data-on="1"] { color: var(--ok); }
