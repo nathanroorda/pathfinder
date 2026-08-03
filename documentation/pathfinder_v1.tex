@@ -1,0 +1,255 @@
+% ============================================================
+% Pathfinder -- Version 1
+% Compile with: pdflatex pathfinder-v1-information-document.tex
+% ============================================================
+\documentclass[11pt,a4paper]{article}
+
+% ---------- Packages ----------
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{lastpage}
+\usepackage[hidelinks]{hyperref}
+
+% ---------- Branding colors (customize) ----------
+\definecolor{primary}{HTML}{1F4E79}
+\definecolor{accent}{HTML}{2E86AB}
+
+% ---------- Section styling ----------
+\titleformat{\section}
+  {\Large\bfseries\color{primary}}{\thesection}{0.8em}{}
+\titleformat{\subsection}
+  {\large\bfseries\color{accent}}{\thesubsection}{0.8em}{}
+
+% ---------- Header / footer ----------
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textcolor{primary}{Pathfinder -- Version 1}}
+\fancyhead[R]{\small \today}
+\fancyfoot[C]{\small Page \thepage\ of \pageref{LastPage}}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ---------- Document metadata (customize) ----------
+\newcommand{\productname}{Pathfinder}
+\newcommand{\companyname}{Rouge Media}
+\newcommand{\docversion}{Version 1}
+
+\begin{document}
+
+% ============================================================
+% TITLE PAGE
+% ============================================================
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+    % \includegraphics[width=0.3\textwidth]{logo.png}\par\vspace{1cm}
+    {\Huge\bfseries\color{primary} \productname\par}
+    \vspace{0.5cm}
+    {\LARGE Version 1\par}
+    \vspace{1.5cm}
+    {\large Prepared by: \companyname\par}
+    {\large Version: \docversion\par}
+    {\large Date: \today\par}
+    \vfill
+    \begin{tabular}{ll}
+        \toprule
+        \textbf{Author}   & Nathan Roorda \\
+        \bottomrule
+    \end{tabular}
+    \vspace{2cm}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+% ============================================================
+% 1. WHAT THE PRODUCT IS
+% ============================================================
+\section{What Pathfinder Is}
+
+\subsection{Overview}
+% One or two paragraphs describing the product at a high level.
+\productname{} is a camera control unit designed to help camera operators control their camera remotely from their phone or laptop. It features built in programs that support unique applications like target tracking, dynamic time-lapses, automated focal point transitions, and more. Pathfinder is also the central control for all connected Pathfinder modules like motorized mounts, camera sliders, GPS modules, and more. It targets photographers and videographers of all levels, and addresses the need for unique and dynamic camera control from a distance.
+
+\subsection{Problem Statement}
+% What pain point or gap does this product address?
+Pathfinder addresses the gap in creative support for content creators. Many unique, dynamic, and creative camera applications are difficult to operate by hand and generally require a skilled camera operator.\\
+
+\subsection{Proposed Solution}
+% How the product addresses the problem, conceptually.
+Pathfinders core functionality by itself is not a novel idea, camera control units currently exist on the market (CamRanger2, Sony Camera App, etc). The core control functionality will be comparable to these existing solutions. What will set Pathfinder apart is the collection of useful modules and unique programs that allow operators to easily perform complex motions and dynamic shots at the press of a button. These will include:
+\begin{itemize}[leftmargin=1.5em]
+    \item Target tracking
+    \item Pan/tilt motion planning
+    \item Situational setting presets
+    \item Custom timeline scheduling
+\end{itemize}
+
+\subsection{Target Users}
+\begin{tabular}{p{0.25\textwidth} p{0.65\textwidth}}
+    \toprule
+    \textbf{User Type} & \textbf{Needs Addressed} \\
+    \midrule
+    Solo Creators & Camera control from a distance \\
+    Beginners & Support with creative applications \\
+    Experts & Custom planning of dynamic motion \\
+    \bottomrule
+\end{tabular}
+
+\subsection{Scope of Version 1}
+% Clearly bound what Version 1 does and does not cover.
+\textbf{In scope:}
+\begin{itemize}[leftmargin=1.5em]
+    \item Full action and setting control over compatible Sony cameras
+    \item Wifi connection
+    \item Log and testing infrastructure
+\end{itemize}
+
+\textbf{Out of scope:}
+\begin{itemize}[leftmargin=1.5em]
+    \item Bluetooth compatibility
+    \item Cross-camera compatibility
+    \item External modules and scheduling capabilities
+    \item Unique application software integration
+\end{itemize}
+
+% ============================================================
+% 2. WHAT THE PRODUCT CAN DO
+% ============================================================
+\section{What Pathfinder Can Do}
+
+\subsection{Key Capabilities}
+% Summarize the main capabilities available in Version 1.
+\begin{tabular}{p{0.3\textwidth} p{0.6\textwidth}}
+    \toprule
+    \textbf{Capability} & \textbf{Description} \\
+    \midrule
+    Wireless control & The unit creates its own WiFi network. Any phone or laptop that joins it opens the control page in a browser --- no app to install and no internet connection required. \\
+    Live preview & A continuous view through the camera, shown on the phone, so the operator can frame the shot from wherever they are standing. \\
+    Shooting & Take a photo, start and stop video recording, or run a timed long exposure, all from the control page. \\
+    Focus control & Autofocus on demand, manual focus nudges in three step sizes, tap-the-preview to move the focus point, and a punch-in magnifier for checking critical focus. \\
+    Camera settings & The settings panel is built from whatever the connected camera reports (ISO, aperture, shutter speed, and the rest), so changes can be made without touching the body. \\
+    Camera status & A strip of live readouts --- battery, shots remaining, lens, and model --- so the operator knows the camera's condition at a glance. \\
+    Unattended reliability & The unit finds the camera on its own, recovers on its own if the connection drops, and restarts itself if the camera stops responding. \\
+    \bottomrule
+\end{tabular}
+
+\subsection{Feature Details}
+
+\subsubsection{Feature 1: Wireless Browser Control}
+\textbf{Description:} The unit hosts a WiFi network named \textit{Pathfinder}. Joining it and opening a web address brings up the full control page.\\
+\textbf{User benefit:} Works anywhere --- remote locations, no cell service, no app store, and any phone, tablet, or laptop the operator already owns.\\
+\textbf{Demonstration:} Join the network on a phone, open the page, and confirm the status line reads \textit{Connected} with the camera model.
+
+% \begin{figure}[h]
+%     \centering
+%     \includegraphics[width=0.8\textwidth]{feature1-screenshot.png}
+%     \caption{The Pathfinder control page on a phone.}
+% \end{figure}
+
+\subsubsection{Feature 2: Live Preview}
+\textbf{Description:} A live image from the camera streams to the control page and updates continuously.\\
+\textbf{User benefit:} The operator can compose and check the shot without standing behind the camera.\\
+\textbf{Demonstration:} Move the camera or a subject in front of it and watch the preview follow.
+
+\subsubsection{Feature 3: Focus Tools}
+\textbf{Description:} A one-touch autofocus button, near/far manual focus nudges with selectable step sizes, tap-anywhere-on-the-preview to move the focus point, and a magnifier that punches the preview in for a closer look.\\
+\textbf{User benefit:} Focus can be set and confirmed remotely, including small corrections that would otherwise mean walking back to the camera. Focus changes are permitted while recording, so a focus pull mid-shot is possible.\\
+\textbf{Demonstration:} Tap a subject in the preview, magnify, nudge focus a step at a time, and watch it sharpen.
+
+\subsubsection{Feature 4: Capture and Recording}
+\textbf{Description:} A \textbf{Capture} button takes a still; a \textbf{Record} button starts and stops video. The page shows which mode the camera is in and prevents the two from conflicting.\\
+\textbf{User benefit:} Nothing has to be touched on the camera itself, so the shot is never disturbed by the act of triggering it.\\
+\textbf{Demonstration:} Take a still and confirm the on-screen result; start a recording and confirm the button and camera both report it.
+
+\subsubsection{Feature 5: Long Exposure (Bulb)}
+\textbf{Description:} With the camera in Bulb mode, the operator enters a duration and taps \textbf{Bulb}. The unit holds the shutter open for exactly that long, counts the exposure down on screen, and closes it automatically.\\
+\textbf{User benefit:} Repeatable long exposures for night and astro work, without holding a remote release or timing by hand. The duration is capped so a mistyped value cannot leave the shutter open.\\
+\textbf{Demonstration:} Enter a duration, tap the button, and watch the countdown and the resulting frame.
+
+\subsubsection{Feature 6: Automatic Settings Panel}
+\textbf{Description:} The unit asks the camera what it can adjust and builds the settings panel from the answer. Each control is presented in the form that fits it --- a list, a switch, a slider, or a text field --- and edits are sent to the camera immediately.\\
+\textbf{User benefit:} Full exposure control from the phone. Because nothing is written for one specific camera, plugging in a different body simply produces a different panel.\\
+\textbf{Demonstration:} Change ISO or aperture on the phone and confirm the camera follows, and that related settings update alongside it.
+
+\subsubsection{Feature 7: Camera Status Readouts}
+\textbf{Description:} Battery level, remaining shots, lens, and camera model are displayed above the controls and refresh on their own.\\
+\textbf{User benefit:} The operator knows when the battery or card is running out before a shot is lost, without approaching the camera.\\
+\textbf{Demonstration:} Watch the battery and remaining-shots readouts change over a shooting session.
+
+\subsubsection{Feature 8: Unattended Operation}
+\textbf{Description:} The unit connects to the camera by itself at power-on and keeps watching for one. If the camera is unplugged, loses its connection, or stops responding mid-session, the unit clears the failed connection and re-establishes it without any user action; if it stops responding entirely, the unit restarts itself.\\
+\textbf{User benefit:} A camera left running for hours recovers on its own instead of requiring a trip out to it.\\
+\textbf{Demonstration:} Unplug and replug the camera mid-session and watch the page return to \textit{Connected} on its own.
+
+\subsection{Example Use Cases}
+\begin{enumerate}[leftmargin=1.5em]
+    \item \textbf{Solo creator, on camera:} A creator sets up the camera, steps into frame, and uses their phone to check framing on the live preview, set focus on themselves, adjust exposure, and start recording --- without walking back and forth.
+    \item \textbf{Night and astro photography:} With the camera on a tripod in the cold, the operator stays in a vehicle, sets a two-minute exposure from the phone, and watches it count down. Repeating the exposure takes one tap, and nothing bumps the tripod between frames.
+    \item \textbf{Wildlife or hard-to-reach placement:} The camera is positioned close to a subject or in a spot the operator cannot occupy. From a distance, they watch the preview, move the focus point onto the animal by tapping it, and trigger the shot silently from the phone.
+    \item \textbf{Studio and product work:} The camera stays locked off on a tripod while the operator adjusts ISO, aperture, and shutter speed from the phone between shots, so the framing never shifts from handling the body.
+\end{enumerate}
+
+\subsection{Success Criteria}
+% How will you judge whether Version 1 meets its goals?
+\begin{tabular}{p{0.4\textwidth} p{0.25\textwidth} p{0.25\textwidth}}
+    \toprule
+    \textbf{Criterion} & \textbf{Target} & \textbf{Result} \\
+    \midrule
+    Setup for the operator            & No app install, no internet & Met \\
+    Camera ready after plug-in        & $<$ 5 seconds               & Met \\
+    Recovery from a dropped connection, unaided & $\leq$ 3 seconds  & Met \\
+    Recovery from an unresponsive camera & $\leq$ 45 seconds        & Met \\
+    Long exposure length is bounded   & $\leq$ 900 seconds          & Met \\
+    Settings panel adapts to the camera & No per-camera changes     & Met \\
+    Cameras verified end to end       & $\geq$ 1 body               & Met (Sony $\alpha$7~IV) \\
+    Live preview smoothness           & Usable for framing          & TBD \\
+    Control range on the unit's WiFi  & TBD                         & TBD \\
+    \bottomrule
+\end{tabular}
+
+\subsection{Limitations and Future Work}
+\begin{itemize}[leftmargin=1.5em]
+    \item Only the Sony $\alpha$7~IV has been verified end to end. Other cameras are expected to work but have not yet been confirmed on hardware.
+    \item The camera must be connected to the unit by cable; the link between the operator and the unit is what is wireless.
+    \item One camera at a time. The unit controls a single connected body.
+    \item The unit's own WiFi network and an existing WiFi network cannot both be used at once.
+    \item The live preview pauses during video recording and during a long exposure, and returns on its own afterwards.
+    \item Long exposures require the camera to already be set to Bulb mode; the unit does not set that mode for the operator.
+    \item Anyone who joins the unit's WiFi network can control the camera --- there is no per-user sign-in.
+    \item Next phase: verify additional camera bodies, and begin the module and program work outlined in Section~1.
+\end{itemize}
+
+% ============================================================
+% APPENDIX (optional)
+% ============================================================
+\appendix
+\section{Appendix}
+\subsection{Glossary}
+\begin{description}
+    \item[Access point] A WiFi network broadcast by the unit itself, which phones and laptops join directly. It does not require or provide internet access.
+    \item[Tether] A cable connection between a camera and a computer that lets the computer operate the camera.
+    \item[Live preview] A continuous live image sent from the camera, used to frame and check a shot.
+    \item[Bulb] A camera mode in which the shutter stays open for as long as the release is held, used for exposures longer than the camera's normal limits.
+    \item[Focus point] The spot in the frame the camera focuses on. Pathfinder lets the operator move it by tapping the preview.
+    \item[Focus magnifier] A camera function that enlarges part of the preview so fine focus can be judged accurately.
+    \item[Telemetry] Read-only information reported by the camera, such as battery level, remaining shots, and the attached lens.
+    \item[Watchdog] A safeguard that restarts the unit's software automatically if it stops responding.
+\end{description}
+
+\subsection{References}
+% Add links, documents, or supporting material here.
+\begin{itemize}[leftmargin=1.5em]
+    \item Project repository and setup guide --- \url{https://github.com/nathanroorda/pathfinder}
+    \item libgphoto2, the camera control library Pathfinder is built on --- \url{https://github.com/gphoto/libgphoto2}
+    \item Raspberry Pi, the hardware platform for Version 1 --- \url{https://www.raspberrypi.com}
+\end{itemize}
+
+\end{document}

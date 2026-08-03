@@ -1,18 +1,63 @@
 # Pathfinder — Outstanding Issues
 
-Findings from a full-codebase review (2026-07-25), plus a second pass on
-2026-07-30 after the watchdog work landed (#39-#49, in "Later findings" at the
-end). Ordered by suggested fix order: physical-hardware risk first, then
-correctness, then structure, then hardening.
+Findings from a full-codebase review (2026-07-25); a second pass on 2026-07-30
+after the watchdog work landed (#39-#49, in "Later findings"); and a third pass
+on **2026-08-03** measuring the tree against the Version 1 scope requirement
+*"full action and setting control over compatible Sony cameras"*
+(`documentation/pathfinder_v1.tex`) — #50-#57, in "Requirement gaps" at the end.
+Ordered by suggested fix order: physical-hardware risk first, then correctness,
+then structure, then hardening.
 
 Each item states **what** is wrong, **why** it matters, and a suggested fix.
-Line numbers in #1-#38 refer to the state of the tree at commit `da23621` and
-are now several commits stale — `BulbExposure` has moved from `app/app.py:28` to
-`:50`, the `StaticFiles` mount from `:284` to `:392`. #39 onward are anchored to
-`d841aa4`.
+**All line numbers were re-anchored to `5e242fc` (the focus-magnifier commit) on
+2026-08-03** and are current as of that tree.
 
 **Legend:** 🔴 critical · 🟠 high · 🟡 medium · ⚪ low / nit
 · ✅ fixed & verified · 🧪 fix applied, awaiting hardware verification
+
+---
+
+## Requirement coverage — "full action and setting control"
+
+The Version 1 scope commits to full action and setting control over compatible
+Sony bodies, and `documentation/pathfinder_v1.tex` sells two specific
+consequences: *"Full exposure control from the phone"* (Feature 6) and a
+telemetry strip reading *"battery, shots remaining, lens, and model"*
+(Feature 7). Measured against `tests/fixtures/ilce_7m4.txt` — a real
+`--list-all-config` dump of the α7 IV — here is what the app actually reaches
+today:
+
+| Section | Widgets | Writable | Exposed by Pathfinder | Gap |
+|---|---|---|---|---|
+| `/main/actions` | 8 | 8 | **7** — all but `opcode` | `opcode` excluded on purpose (raw PTP); see #54 |
+| `/main/settings` | 2 | 2 | 2 | — |
+| `/main/imgsettings` | 4 | 3 | 3 | 1 read-only widget is hidden rather than shown (#56) |
+| `/main/capturesettings` | 22 | 15 | 15 | 7 read-only widgets hidden, **including aperture and shutter speed** (#50, #56) |
+| `/main/status` | 7 | 0 | 7 (telemetry) | remaining-shots and lens are **not here** (#52) |
+| `/main/other` | 346 | 156 | **0** | ~30 carry real labels, **14 with no named equivalent** (#51); ~13 more are the modern Sony remote-control actions (#55); the rest are raw aliases or `PTP Property 0xNNNN` |
+
+**The honest summary:** the *action* half of the requirement is met on this body
+(7 of 8, the eighth deliberately withheld) but only because `camera/sony.py`
+names each widget by hand — nothing generalises (#54). The *setting* half is met
+for the three named sections and not at all for `/main/other`, which is where
+Creative Style, Picture Profile, the movie file formats, interval-REC and ~150
+other writable properties live (#51).
+
+Two claims in the v1 document are **not currently true of the code**, and both
+are cheap to settle:
+
+- **Aperture and shutter speed never appear in the settings panel.** In the only
+  dump we have they are `Readonly: 1`, and `_settable_widgets` drops read-only
+  widgets — so the two controls the document names explicitly are absent from
+  the UI, silently. See #50; the likely cause is benign (the dump was taken in
+  **P**) but it has never been checked, and #56 is why nobody noticed.
+- **"Shots remaining" and "lens" are not obtainable from `/main/status`.**
+  Remaining shots is `/main/other/d249`; no lens property appears anywhere in
+  the dump. See #52.
+
+A third, unrelated to the camera: **a provisioned device does not host its own
+WiFi on boot** (`AP_ON_BOOT` defaults to `0`), which the document's Feature 1
+and success criteria both assume. See #53.
 
 ---
 
@@ -72,8 +117,9 @@ are now several commits stale — `BulbExposure` has moved from `app/app.py:28` 
   → `could not release bulb after 3 attempts` → `camera connection lost …
   dropping`, that the client gets 503, and that replugging reconnects within
   ~3s. `uhubctl` may be able to cut port power remotely if the Pi supports it.
-- **Where:** `camera/gp2.py:114-117`
-- **Issue:**
+- **Where:** `camera/gp2.py:139-163` (`bulb`), `camera/gp2.py:327-339`
+  (`_release_action`)
+- **Issue (pre-fix):**
   ```python
   self._drive_action(widget, 1)
   try:
@@ -118,8 +164,8 @@ are now several commits stale — `BulbExposure` has moved from `app/app.py:28` 
 - **Still open:** the second half of this item is unaddressed. The timeout now
   rarely fires, but when it does the orphaned `FILE_ADDED` still leaks into the
   next capture's `_drain_events()` and desynchronises the event stream.
-- **Where:** `camera/gp2.py:130` (`_wait_for_image(self, timeout_ms=15000)`),
-  called at `gp2.py:118`
+- **Where:** `camera/gp2.py:172-179` (`_wait_for_image`), called at
+  `camera/gp2.py:160`
 - **Issue:** The 15-second window starts *after* the exposure ends. With Long
   Exposure NR enabled — the Sony default, and effectively mandatory for the long
   exposures bulb exists to serve — the a7 IV shoots a dark frame of **equal
@@ -156,7 +202,7 @@ are now several commits stale — `BulbExposure` has moved from `app/app.py:28` 
   being busy when the capture transaction arrives, and the honest fix is
   draining events after the AF drive rather than letting the retry absorb it.
 - **Where:** `camera/sony.py:6` (`af_drive_values: (1, 0)`),
-  `camera/gp2.py:179-187` (`autofocus`)
+  `camera/gp2.py:227-242` (`autofocus`)
 - **Issue:** The loop writes each value in sequence with no `try`/`finally`. If the
   `1` (press) lands and the `0` (release) raises, AF is left half-pressed.
 - **Why it matters:** A half-pressed AF holds focus/metering and can block other
@@ -206,8 +252,8 @@ are now several commits stale — `BulbExposure` has moved from `app/app.py:28` 
   `low..high` but never snap to the grid, so an off-grid value like `3.5` on a
   step-1 widget is still sent as-is. Unknown whether the a7 IV rounds or rejects;
   worth checking during the next rig session.
-- **Where:** `app/app.py:24-25` (`FocusStep`), `camera/gp2.py:189-195`,
-  `camera/gp2.py:296-301` (`_coerce`)
+- **Where:** `app/app.py:46-47` (`FocusStep`), `camera/gp2.py:244-250`
+  (`manual_focus`), `camera/gp2.py:432-449` (`_coerce` / `_within_range`)
 - **Issue:** `FocusStep.steps` is an unbounded `int`. `_coerce` does `float(value)`
   with no reference to the widget's advertised `get_range()`. Per the hardware
   notes, `manualfocus` on the a7 IV is a RANGE bounded **−7..7**;
@@ -252,9 +298,10 @@ are now several commits stale — `BulbExposure` has moved from `app/app.py:28` 
   `status` widget). `shuttertype` — a genuine listed setting — still returns 200
   with the full 20-item list, confirming the allowlist is not drawn too tight.
 
-- **Where:** `app/app.py:271-281` → `camera/gp2.py:235-241`
-- **Issue:** `list_settings()` carefully filters to `INCLUDE_SECTIONS` and drops
-  read-only widgets (`gp2.py:224-233`). `set_setting()` re-checks **neither** — it
+- **Where:** `app/app.py:399-411` → `camera/gp2.py:346-352`, resolved through
+  `camera/gp2.py:375-388` (`_settable_widgets` / `_settable_widget`)
+- **Issue (pre-fix):** `list_settings()` carefully filtered to `INCLUDE_SECTIONS`
+  and dropped read-only widgets. `set_setting()` re-checked **neither** — it
   calls `cfg.get_child_by_name(name)` on the whole config tree with a
   client-supplied name.
 - **Why it matters:** An unauthenticated client on the AP can write widgets the UI
@@ -358,8 +405,8 @@ are now several commits stale — `BulbExposure` has moved from `app/app.py:28` 
   later capture's drain. Bounding the wait stops the hang; it doesn't make the
   queue coherent. The real fix is to match events to the operation that caused
   them rather than flushing blindly.
-- **Where:** `camera/gp2.py:146-151`
-- **Issue:**
+- **Where:** `camera/gp2.py:189-199`
+- **Issue (pre-fix):**
   ```python
   while self._cam.wait_for_event(timeout_ms)[0] != gp.GP_EVENT_TIMEOUT:
       pass
@@ -419,14 +466,16 @@ are now several commits stale — `BulbExposure` has moved from `app/app.py:28` 
   -p Restart` and `journalctl -u pathfinder | grep "watchdog armed"`;
   (c) `kill -STOP` the process and confirm systemd aborts and restarts it within
   ~30s; (d) confirm no spurious restarts over a long idle session.
-- **Where:** whole stack — `camera/gp2.py` (all `self._cam.*` calls),
-  `app/app.py:110-117` (`_run_camera`), `tools/setup.sh:143` (`Restart=on-failure`)
+- **Where:** whole stack — `camera/gp2.py:99-110` (`_bus`, wrapping every
+  `self._cam.*` call), `app/app.py:211-220` (`_run_camera`),
+  `app/app.py:138-155` (`_watchdog`), `tools/setup.sh:143-146`
+  (`Restart=always` / `WatchdogSec=30` / `NotifyAccess=main`)
 - **Issue:** `cam.init()`, `capture()`, `file_get()`, `set_config()` are blocking C
   calls into USB with no bound. If the camera wedges mid-PTP transaction — which
   Sony bodies demonstrably do, per the existing `-52` self-healing — the
   threadpool worker is gone permanently. `run_in_threadpool` uses AnyIO's default
   limiter of **40 workers**; each hang burns one until the process is dead. A
-  wedged `_try_connect` (`app/app.py:58`) is worse: it also holds `_connect_lock`, so
+  wedged `_try_connect` (`app/app.py:63-74`) is worse: it also holds `_connect_lock`, so
   `/api/connect` and the reconnect watcher hang with it.
 - **Why it matters:** The failure mode is a silently bricked field device.
   `Restart=on-failure` cannot help, because a hung process hasn't failed — it's
@@ -441,7 +490,10 @@ are now several commits stale — `BulbExposure` has moved from `app/app.py:28` 
 
 ### 9. 🟡 `_drop_camera` can close a freshly-reconnected camera
 
-- **Where:** `app/app.py:99-107`
+- **Status:** open, unchanged as of `5e242fc`. `_drop_camera` still takes only
+  the exception and `_run_camera` still does not forward the camera it used.
+- **Where:** `app/app.py:200-208` (`_drop_camera`), called from
+  `app/app.py:211-220` (`_run_camera`)
 - **Issue:** Read-then-clobber with no identity check:
   ```python
   old = app.state.camera
@@ -469,7 +521,13 @@ are now several commits stale — `BulbExposure` has moved from `app/app.py:28` 
 
 ### 10. 🟡 Liveview is a per-client stream against a single-owner resource
 
-- **Where:** `app/app.py:167-195`, `web/script.js:28-43`
+- **Where:** `app/app.py:268-305` (`/api/liveview`), `web/script.js:35-50`
+- **Since the #8 fix:** the first two consequences below are bounded, not gone.
+  `preview()` takes the bus with `PREVIEW_BUS_TIMEOUT` (0.25s) and a refused
+  frame is a 409 the generator treats as "pause" (`app/app.py:284-289`), so a
+  second tab no longer parks a worker for a whole bulb — it burns one 0.25s
+  acquisition attempt every 0.3s instead. The third (a `RuntimeError` during
+  recording retried forever at 3.3 Hz, `app/app.py:290-293`) is unchanged.
 - **Issue:** Each `<img src="/api/liveview">` opens its own generator grabbing the
   camera lock up to 30×/s, one threadpool task per frame. Three consequences:
   - Multi-client is the stated use case (phone + laptop on the AP), but N clients
@@ -493,7 +551,7 @@ are now several commits stale — `BulbExposure` has moved from `app/app.py:28` 
 
 ### 11. 🟡 Capture filenames: traversal, backwards clocks, and non-atomic writes
 
-- **Where:** `camera/gp2.py:123-128`
+- **Where:** `camera/gp2.py:165-170` (`_download`)
 - **Issue:** `target = os.path.join(save_dir, f"{int(time.time())}_{path.name}")`
   has three independent problems:
   - **Traversal from device data.** `path.name` comes from the camera. The
@@ -519,7 +577,9 @@ are now several commits stale — `BulbExposure` has moved from `app/app.py:28` 
 
 ### 12. 🟡 `self.recording` is app-side belief, not camera truth
 
-- **Where:** `camera/gp2.py:166-177`
+- **Where:** `camera/gp2.py:214-225` (`set_recording`), `camera/gp2.py:93`
+  (`self.recording = False` in `__init__`), `app/app.py:223-230` (`/api/status`
+  publishes it)
 - **Issue:** `set_recording` writes the widget and unconditionally sets the flag.
   If the body silently refuses (no card, wrong mode dial), the flag says
   "recording" and stills stay blocked until the user presses Stop. After a
@@ -529,6 +589,16 @@ are now several commits stale — `BulbExposure` has moved from `app/app.py:28` 
   drifts, and the UI presents the drifted value as authoritative.
 - **Fix:** Read the widget back after the write and derive the flag from the
   camera's reported value. On reconnect, query rather than assume.
+- ✅ **The camera-truth read exists and is now identified** (2026-08-03, from
+  the config dump): `/main/other/d21d` — **`Movie Recording State`**, `MENU`,
+  `Readonly: 1`, choices `0/1/2`. That is the widget this item has always
+  needed, and it costs nothing extra if it rides the shared config snapshot #49
+  proposes. Two caveats before trusting it: `movie` (the *write* side) is
+  `/main/actions/movie`, a different widget in a different section, so this is a
+  genuine read-back rather than an echo; and the 0/1/2 encoding is unlabelled —
+  the mapping to idle/recording needs one rig observation. Note also that
+  reading it goes through `/main/other`, which `telemetry()` does not currently
+  walk — so this lands with #52, not before it.
 
 ---
 
@@ -536,10 +606,14 @@ are now several commits stale — `BulbExposure` has moved from `app/app.py:28` 
 
 ### 13. 🟠 Vendor quirks replace the defaults instead of layering over them
 
-- **Where:** `camera/gp2.py:304-313` (`_quirks_for`), `camera/gp2.py:14-29`
-  (`DEFAULT_QUIRKS`), `camera/sony.py:1-15` (`GENERAL`)
+- **Where:** `camera/gp2.py:452-461` (`_quirks_for`), `camera/gp2.py:26-43`
+  (`DEFAULT_QUIRKS`), `camera/sony.py:1-18` (`GENERAL`)
 - **Issue:** `_quirks_for` returns the vendor dict as-is, so `sony.GENERAL` has to
-  re-specify all 13 keys — duplicating `DEFAULT_QUIRKS` in full.
+  re-specify all **16** keys — duplicating `DEFAULT_QUIRKS` in full. (It was 13
+  when this was filed; the magnifier work added `magnifier_widget` and
+  `magnifier_off`, and both had to be written twice. The duplication predicted
+  here is now measurable: the table has grown by 3 keys and every one of them
+  landed in two files.)
 - **Why it matters:** **This is the most important structural fix before a second
   vendor lands.** When `canon.py` omits a key, there is no error at import — you
   get a `KeyError` deep inside a request handler, months later, on someone else's
@@ -554,7 +628,7 @@ are now several commits stale — `BulbExposure` has moved from `app/app.py:28` 
 
 ### 14. 🟡 No declared vendor contract
 
-- **Where:** `camera/gp2.py:30` (`VENDORS = [sony]`)
+- **Where:** `camera/gp2.py:44` (`VENDORS = [sony]`)
 - **Issue:** The backend duck-types a module-level `quirks(model)` function. What a
   vendor module owes the backend is documented in prose only.
 - **Why it matters:** This is the first file a contributor adding Nikon reads. An
@@ -564,7 +638,7 @@ are now several commits stale — `BulbExposure` has moved from `app/app.py:28` 
 
 ### 15. 🟡 Model matching is fragile, and the per-model layer has never been exercised
 
-- **Where:** `camera/sony.py:17-30`
+- **Where:** `camera/sony.py:20-33`
 - **Issue:** `quirks()` gates on `"sony" in model.lower()`, then substring-matches
   `MODELS`. But `MODELS = {"A7 IV": {}}` has an **empty override dict** — so the
   entire per-model layer is currently a no-op and has never actually run.
@@ -578,7 +652,7 @@ are now several commits stale — `BulbExposure` has moved from `app/app.py:28` 
 
 ### 16. 🟡 `_ensure_focus_mode` writes a single hardcoded target and never restores it
 
-- **Where:** `camera/gp2.py:206-217`, `camera/sony.py:8-11`
+- **Where:** `camera/gp2.py:309-320` (`_ensure_focus_mode`), `camera/sony.py:8-12`
 - **Issue:** Two problems:
   - It writes one literal target (`af_target_mode`, `"AF-A"`). If a body doesn't
     offer that exact string, **every AF press 400s permanently.**
@@ -587,13 +661,24 @@ are now several commits stale — `BulbExposure` has moved from `app/app.py:28` 
     accept a write the hardware overrides.
   Also, `af_modes` lists `"AF-S"`, which the recorded a7 IV `focusmode` choices
   (`Automatic/AF-A/AF-C/DMF/Manual`) do not contain — harmless as an extra
-  "acceptable" entry, but it signals the table is partly guessed.
+  "acceptable" entry, but it signals the table is partly guessed. Confirmed
+  against the dump 2026-08-03: `/main/capturesettings/focusmode` is a `RADIO`
+  with exactly **5** choices and `Current: AF-A`, so `af_target_mode` is right
+  on this body and `"AF-S"` is indeed dead weight.
 - **Why it matters:** A hardcoded string is a single point of failure across ~2,000
   supported bodies, and the failure is total (the button never works) rather than
   degraded.
 - **Fix:** Choose the first entry of `acceptable` that is actually present in the
   widget's `get_choice(...)` list, rather than trusting one literal. Document — or
   restore — the focus-mode mutation.
+- **Recover the lost comment while you're here.** `7372a98` ("update sony.py
+  concise code structure") deleted the block comment that explained what
+  `af_modes`/`mf_modes` *mean* — that they list the modes in which the action
+  actually reaches the motor, that the button leaves an already-acceptable mode
+  alone, and that `DMF` was left out of `mf_modes` pending verification on the
+  body. That reasoning now exists only in git history, and it is precisely the
+  reasoning someone adding a second vendor needs. Restore it, or move it into
+  `camera/camera.md` next to the quirk table.
 
 ### 17. 🟠 Verify three Sony quirk values against the real body
 
@@ -612,8 +697,9 @@ are now several commits stale — `BulbExposure` has moved from `app/app.py:28` 
   - ✅ **`bulb_widget: "bulb"` is correct on this body.** `/main/actions/bulb`
     exists, `TOGGLE`, writable, label "Bulb Mode". The Canon-convention worry was
     unfounded here. (The *friendly-message* half of this item still stands — the
-    `if not widget` guard at `gp2.py:141` only checks the quirk is set, not that
-    the widget exists, so a body without it still gets a raw libgphoto2 error.)
+    `if not widget` guard at `gp2.py:144-146` only checks the quirk is set, not
+    that the widget exists, so a body without it still gets a raw libgphoto2
+    error.)
   - ⬜ **The idle-value question is open, and it is broader than AF.** The dump
     shows **both** `autofocus` *and* `bulb` reporting `Current: 2`, while
     `af_drive_values` releases AF to `0` and `bulb()` releases to `0`. So both
@@ -624,13 +710,28 @@ are now several commits stale — `BulbExposure` has moved from `app/app.py:28` 
   settle it, because `spotfocusarea` is a `TEXT` widget with an empty current
   value and advertises no range. Set `af_area_size` to `(1, 1)`, tap each corner
   of the preview, and read back what the body accepted. Also confirm the point
-  only moves when `focusarea` is one of the `Flexible Spot` choices.
+  only moves when `focusarea` is one of the `Flexible Spot` choices — the dump
+  shows `/main/capturesettings/focusarea` is a writable `RADIO` with 14 choices,
+  currently `Wide`, so **tap-to-focus cannot work at all in the state the dump
+  was taken in.** Set `focusarea` to a Flexible Spot choice *first*, or the
+  corner-tap experiment measures nothing. That the app never checks this is
+  itself a gap: `set_af_point` should refuse (409) rather than write into a
+  focus mode that ignores it — same family as #38.
+- **Second candidate for the same job, found 2026-08-03:**
+  `/main/other/d2dc` — **`AF Area Position`**, `RANGE`, writable. It belongs to
+  the newer Sony remote-control property family (#55) and is the more likely
+  modern path for a coordinate write than a `TEXT` widget that takes a
+  comma-joined string. It advertises `Bottom: 0 Top: 0 Step: 0` in the dump,
+  i.e. no usable range while idle — which is exactly why a dump can't settle
+  this and the rig must. Try both in the same session; if `d2dc` works, the
+  `af_area_size` question dissolves (the widget carries its own range) and
+  `_within_range` clamping already covers it.
 
 ### 18. 🟡 Whole-tree config writes where single-widget writes belong
 
-- **Where:** `camera/gp2.py:235-241` (`set_setting`), `gp2.py:206-217`
-  (`_ensure_focus_mode`), `gp2.py:166-177` (`set_recording`) — versus
-  `gp2.py:219-222` (`_drive_action`), which does it correctly
+- **Where:** `camera/gp2.py:346-352` (`set_setting`), `gp2.py:309-320`
+  (`_ensure_focus_mode`), `gp2.py:214-225` (`set_recording`) — versus
+  `gp2.py:322-325` (`_drive_action`), which does it correctly
 - **Issue:** These read the entire config tree and write it back, rather than using
   `get_single_config` / `set_single_config`.
 - **Why it matters:** Whole-config writes are slow on Sony (hundreds of ms to
@@ -648,7 +749,8 @@ are now several commits stale — `BulbExposure` has moved from `app/app.py:28` 
 
 ### 19. ⚪ Every setting change costs three full config reads
 
-- **Where:** `app/app.py:271-281`
+- **Where:** `app/app.py:399-411` (`set_setting` route), `camera/gp2.py:346-352`
+  + `camera/gp2.py:341-344`
 - **Issue:** `set_setting` does a full `get_config`, then the handler returns
   `cam.list_settings()` which does another.
 - **Why it matters:** Combined with the 400ms debounce and range `change` events,
@@ -657,9 +759,16 @@ are now several commits stale — `BulbExposure` has moved from `app/app.py:28` 
 
 ### 20. 🟠 A camera in MTP/Mass Storage mode connects "successfully" but does nothing
 
-- **Where:** `camera/gp2.py:316-324` (`connect`)
+- **Where:** `camera/gp2.py:464-472` (`connect`)
 - **Issue:** If a Sony body is in MTP/Mass Storage rather than PC Remote,
   `init()` **succeeds** but the config tree is nearly empty.
+- **Now cheap to detect, and cheap to phrase:** `_settable_widgets` already
+  yields exactly the writable surface, and the α7 IV's healthy count is a
+  measured 20 (see the coverage table at the top). A `connect()` that walks it
+  once and refuses — or warns — on an empty result costs one config read on a
+  path that already does several. #56 makes the same failure visible in the UI
+  from the other direction: a panel showing read-only rows would be visibly
+  *empty* here rather than ambiguously empty.
 - **Why it matters:** The user sees `Connected: <model>` with a blank settings
   panel and every button returning 400 — the single most confusing possible
   failure, and one every new user will hit at least once.
@@ -697,7 +806,8 @@ These are the places it's weaker than it looks.
 
 ### 23. 🟡 CSRF on the body-less POST endpoints
 
-- **Where:** `app/app.py:138` (`/api/capture`), `app/app.py:210-217` (`/api/record/*`)
+- **Where:** `app/app.py:243-250` (`/api/capture`), `app/app.py:320-327`
+  (`/api/record/*`)
 - **Issue:** These take no request body, so a plain auto-submitting
   `<form action="http://10.42.0.1:8080/api/record/start" method="post">` on any
   website fires them cross-origin. The JSON-body endpoints are incidentally
@@ -711,8 +821,9 @@ These are the places it's weaker than it looks.
 
 ### 24. 🟡 The service runs as the login user
 
-- **Where:** `tools/setup.sh:138-142`
-- **Issue:** `User=$USER` — typically a member of `sudo`. No hardening directives.
+- **Where:** `tools/setup.sh:137-146` (the generated unit's `[Service]` block)
+- **Issue:** `User=$USER` (`:137`) — typically a member of `sudo`. No hardening
+  directives.
 - **Why it matters:** Any RCE in the app is effectively root on the device.
 - **Fix:** A dedicated unprivileged `pathfinder` user in `plugdev` only, plus
   `NoNewPrivileges=true`, `ProtectSystem=strict`, `PrivateTmp=true`, and
@@ -733,9 +844,8 @@ These are the places it's weaker than it looks.
 
 ### 25. 🟠 libgphoto2 is built from an unpinned `master`
 
-- **Where:** `tools/setup.sh:40` (library), `tools/setup.sh:59` (CLI);
-  `tools/requirements.txt`
-  (lower bounds only)
+- **Where:** `tools/setup.sh:4` + `:39` (library repo and clone),
+  `tools/setup.sh:6` + `:58` (CLI); `tools/requirements.txt` (lower bounds only)
 - **Issue:** Every device provisioned on a different day gets a different library
   build. Python deps have the same problem — `fastapi>=0.110` resolves to whatever
   is newest at provision time.
@@ -749,7 +859,7 @@ These are the places it's weaker than it looks.
 
 ### 26. 🟡 `tools/setup.sh` re-run hazards
 
-- **Where:** `tools/setup.sh:28`, `:38`, `:57`, `:78`
+- **Where:** `tools/setup.sh:28`, `:37`, `:56`, `:78`
 - **Issue:**
   - `sudo apt full-upgrade -y` runs on *every* re-run and can break a working field
     device mid-update.
@@ -765,7 +875,8 @@ These are the places it's weaker than it looks.
 
 - **Where:** `logs/log.py:4` (`DEFAULT_LEVEL = "DEBUG"`)
 - **Issue:** On a Pi writing to persistent journald, with a 3-second reconnect poll
-  (`app/app.py:51`) and per-frame liveview debug lines (`app/app.py:181`).
+  (`app/app.py:77`, `CAMERA_POLL_INTERVAL`) and per-frame liveview debug lines
+  (`app/app.py:287`, `:291`).
 - **Why it matters:** Flash endurance is a hard constraint on this platform, not a
   theoretical one — this is a wear-out failure with a slow fuse.
 - **Fix:** Default to `INFO`. Consider `Storage=volatile` in journald, or a
@@ -784,11 +895,11 @@ These are the places it's weaker than it looks.
 
 ### 29. ⚪ `os.environ.setdefault("LD_LIBRARY_PATH", ...)` is a no-op
 
-- **Where:** `app/app.py:13`
+- **Where:** `app/app.py:14`
 - **Issue:** glibc reads `LD_LIBRARY_PATH` at process start; setting it in-process
   does not affect later `dlopen` search paths. It works today only because of
-  `tools/setup.sh:82` (`ld.so.conf.d`) and the systemd `Environment=` line
-  (`tools/setup.sh:141`).
+  `tools/setup.sh:82-83` (`ld.so.conf.d` + `ldconfig`) and the systemd
+  `Environment=` line (`tools/setup.sh:141`).
 - **Why it matters:** It makes the `import camera` placement below it look
   load-bearing. Someone will "fix the lint" by hoisting the import and conclude
   nothing broke — which is true, but for the wrong reason.
@@ -796,8 +907,8 @@ These are the places it's weaker than it looks.
 
 ### 30. 🟡 Blocking USB I/O on the event loop during startup and shutdown
 
-- **Where:** `app/app.py:71` (`_try_connect`), `app/app.py:80` (`set_recording`),
-  `app/app.py:84` (`camera.disconnect`)
+- **Where:** `app/app.py:162` (`_try_connect` in `lifespan`), `app/app.py:181`
+  (`set_recording`), `app/app.py:185` (`camera.disconnect`)
 - **Issue:** All three run directly on the event loop, not via
   `run_in_threadpool`.
 - **Why it matters:** Startup blocks the server on the USB handshake; shutdown can
@@ -807,17 +918,20 @@ These are the places it's weaker than it looks.
 
 ### 31. ⚪ CWD-relative paths
 
-- **Where:** `app/app.py:284` (`StaticFiles(directory="web")`), `camera/gp2.py:12`
-  (`CAPTURE_DIR = "captures"`)
-- **Issue:** Correct only because the systemd unit sets `WorkingDirectory`. Running
-  `python tools/run.py` from anywhere else crashes at import or writes captures to a
-  surprising location.
+- **Where:** `app/app.py:414` (`StaticFiles(directory="web")`), `camera/gp2.py:14`
+  (`CAPTURE_DIR`)
+- **Issue:** Correct only because the systemd unit sets `WorkingDirectory`
+  (`tools/setup.sh:140`). Running `python tools/run.py` from anywhere else
+  crashes at import or writes captures to a surprising location. `CAPTURE_DIR`
+  gained a `PATHFINDER_CAPTURE_DIR` override since this was filed, but its
+  **default** is still the CWD-relative `"captures"`, so the hazard is unchanged
+  for anyone who doesn't set it.
 - **Fix:** `Path(__file__).parent / "web"`, and resolve `CAPTURE_DIR` against the
   package root.
 
 ### 32. 🟡 A watcher crash silently ends all reconnection
 
-- **Where:** `app/app.py:61-64`
+- **Where:** `app/app.py:97-100`
 - **Issue:** If `_camera_watcher`'s body ever raises, the task dies. Nothing logs
   it and nothing restarts it.
 - **Why it matters:** The device would appear permanently "no camera connected"
@@ -826,32 +940,58 @@ These are the places it's weaker than it looks.
 
 ### 33. ⚪ Inconsistent error mapping across routes
 
-- **Where:** `app/app.py:259-268` (`/api/telemetry`, `/api/settings`), `app/app.py:138-145`
-  (`/api/capture`)
-- **Issue:** `/api/telemetry` and `/api/settings` have no generic handler, so
-  gphoto2 errors become **500 + traceback**, while every sibling route maps them to
-  400. `/api/capture` lacks the `except Exception` that `/api/bulb` has.
+- **Where:** `app/app.py:369-372` (`GET /api/magnifier`), `app/app.py:387-390`
+  (`/api/telemetry`), `app/app.py:393-396` (`GET /api/settings`),
+  `app/app.py:243-250` (`/api/capture`), `app/app.py:411` (see #44)
+- **Issue:** Three read routes have no generic handler, so gphoto2 errors become
+  **500 + traceback**, while every sibling route maps them to 400.
+  `/api/capture` handles `RuntimeError` (409) but lacks the `except Exception`
+  that `/api/bulb` has, so an ordinary capture failure is also a 500.
+- **Grown since filing:** `GET /api/magnifier` was added by the magnifier work
+  and inherited the same omission — which is the argument for the fix below.
+  Every new read route so far has repeated this by default, because the correct
+  behaviour lives in the routes that happen to have remembered it rather than in
+  one place. Four routes now share a bug that no route would have if the mapping
+  were a decorator.
 - **Fix:** Factor the shared error mapping into one decorator or helper so every
-  route behaves the same way.
+  route behaves the same way, and so a *new* route gets it by construction.
 
 ### 34. ⚪ `_capture_with_retry` can return `None`
 
-- **Where:** `camera/gp2.py:153-164`
+- **Where:** `camera/gp2.py:201-212`
 - **Issue:** If a quirk sets `capture_retry_attempts <= 0`, the loop body never
   runs and the function falls off the end returning `None` →
   `AttributeError: 'NoneType' object has no attribute 'name'` in `_download`.
 - **Why it matters:** A plausible mistake in a future vendor file, surfacing as a
   confusing crash far from its cause.
+- **The same shape now appears twice more**, both introduced after this was
+  filed, both from module constants rather than quirks (so not reachable today,
+  but the pattern has spread and should be fixed once, together):
+  - `camera/gp2.py:327-339` (`_release_action`) — with `RELEASE_ATTEMPTS <= 0`
+    the loop never binds `failure`, and the trailing `raise failure` is an
+    `UnboundLocalError`.
+  - `camera/gp2.py:285-295` (`_settled_magnifier`) — with
+    `MAGNIFIER_SETTLE_ATTEMPTS <= 0` the trailing `log.warning(...)` and
+    `return state` reference an unbound `state`.
+  Each is a bounded loop whose "ran zero times" branch was never written. The
+  general fix is the same in all three: clamp the count at the point of use
+  (`max(1, n)`), or assert it at import.
 - **Fix:** Validate the quirk value (`max(1, attempts)`) or raise explicitly.
 - **Test:** acceptance test waiting at
   `tests/test_known_gaps.py::RetryBounds` (expected-failure).
 
 ### 35. ⚪ Settings panel re-renders mid-interaction
 
-- **Where:** `web/script.js:284-294` (`applySetting`)
+- **Where:** `web/script.js:329-339` (`applySetting`), rendering through
+  `web/script.js:307-319` (`renderSettings`)
 - **Issue:** Every change re-renders the whole panel, destroying the `<select>` or
   slider the user is currently touching. On mobile this closes the picker
   mid-interaction.
+- **Worse than it reads:** `/main/capturesettings/capturemode` on the α7 IV has
+  **139 choices** (drive modes, self-timer, every bracketing permutation). That
+  is a 139-option `<select>` on a phone, rebuilt from scratch on every unrelated
+  setting change — and it is also the argument for #51 shipping with grouping
+  rather than one flat list.
 - **Fix:** Patch only the changed row, or skip re-render for the element that has
   focus.
 
@@ -863,21 +1003,27 @@ These are the places it's weaker than it looks.
 
 ### 37. ✅ FIXED — No tests
 
-- **Status:** Fixed 2026-07-25. `tests/` — **311 tests** (228 at the time of the
-  fix, 251 after #7, 295 before the hardware-fixture suite), stdlib `unittest`,
-  no third-party test dependencies. A fake
+- **Status:** Fixed 2026-07-25. `tests/` — **339 tests** (228 at the time of the
+  fix, 251 after #7, 295 before the hardware-fixture suite, 311 before the
+  magnifier work), stdlib `unittest`, no third-party test dependencies. A fake
   `gphoto2` binding (`tests/fakes/`) is installed into `sys.modules` before
   `camera` is imported, so the whole camera layer runs with no libgphoto2 and no
-  camera attached (197 of 311 execute on the dev host, which has no pip). Covers
-  exactly what this item asked for: quirk resolution, `_coerce`, the
+  camera attached (**216 of 339** execute on the dev host, which has no pip).
+  Covers exactly what this item asked for: quirk resolution, `_coerce`, the
   error→HTTP-status mapping, and the disconnect/reconnect state machine. See
   `tests/tests.md`.
+- **Counts re-measured 2026-08-03 on the dev host:** `Ran 339 tests in 1.304s …
+  OK (skipped=123, expected failures=2)`. `tests/tests.md:75` already carries
+  339; this item said 311/197 and was the stale one. The two expected failures
+  are still the remaining `test_known_gaps.py` items (#13, #34).
 - **Last full run on the Pi, 2026-07-26** (under `.venv/bin/python`, after the
   #7 fix): `Ran 251 tests in 1.328s … OK (expected failures=2)` with **zero
   skips** — so the FastAPI/pydantic tests and the fake-vs-real-binding fidelity
-  checks all executed against the genuine binding, not just the dev host's 166.
-  The two expected failures are the remaining `test_known_gaps.py` items (#13,
-  #34); they were 4 before #5 and #6 were promoted into the main suite.
+  checks all executed against the genuine binding. **That run is now 88 tests
+  out of date**; the magnifier and hardware-fixture suites have never been run
+  against the real binding. Re-run it during the next Pi session — it is one
+  command and it is the only thing that proves the fake and the binding still
+  agree.
 - **Note:** `tests/test_known_gaps.py` holds an `@expectedFailure` acceptance
   test for each remaining hazard — now #13 and #34, after #5's and #6's were
   promoted. Fixing one makes the suite red with an *unexpected success* — the
@@ -889,7 +1035,7 @@ These are the places it's weaker than it looks.
 
 ### 38. 🟠 `bulb` reports success when the body is not in BULB mode
 
-- **Where:** `camera/gp2.py` (`bulb`), `app/app.py` (`/api/bulb`)
+- **Where:** `camera/gp2.py:139-163` (`bulb`), `app/app.py:253-265` (`/api/bulb`)
 - **Issue:** `bulb()` refuses only when the *quirk table* has no bulb widget. It
   never checks whether the body is in a state where driving that widget means
   anything. Found on the rig 2026-07-25 while attempting to verify #3: with the
@@ -909,8 +1055,22 @@ These are the places it's weaker than it looks.
   *is* in BULB —
   `curl -s localhost:8080/api/settings | python3 -m json.tool | grep -iE -A6 '"(shutterspeed|expprogram|exposuremode)"'`
   run once in P and once in BULB.
+- ⚠️ **The discovery command above will return nothing for `shutterspeed` as
+  written** (found 2026-08-03). In the checked-in dump
+  `/main/capturesettings/shutterspeed` is `Readonly: 1`, and `list_settings`
+  drops read-only widgets — so `/api/settings` does not contain it at all, in
+  any mode. Read it with `gphoto2 --get-config shutterspeed` with the service
+  stopped, or land #56 first (which makes read-only widgets visible and turns
+  this one-off into an ordinary UI observation). Same correction applies to
+  `expprogram`'s neighbours: `expprogram` itself *is* writable and does appear.
+- **Useful prior from the dump:** `expprogram` reads `P` in the checked-in
+  fixture, confirming that dump — and therefore the void run under #3 — was
+  taken with the dial in **P**. When you re-dump in M + BULB, capture the whole
+  tree (`tools/camera-dump.sh`), not just the one value: it settles this item,
+  the `f-number`/`shutterspeed` question in #50, and #17's `focusarea` state in
+  a single trip.
 - **See also:** #17 (rig-verify quirk values), #3 (blocked behind the same dial
-  access).
+  access), #50 (the same read-only widgets, from the requirement side), #56.
 
 ---
 
@@ -923,9 +1083,9 @@ consequences of the #8 fix that the docs written alongside it didn't account for
 
 ### 39. 🟠 A wedged USB handshake at boot becomes a silent restart loop
 
-- **Where:** `app/app.py:158` (`_try_connect` in `lifespan`), `app/app.py:160-166`
+- **Where:** `app/app.py:162` (`_try_connect` in `lifespan`), `app/app.py:163-171`
   (watchdog task creation), `tools/setup.sh:136` (`Type=simple`),
-  `tools/setup.sh:143-145`
+  `tools/setup.sh:143-146`
 - **Issue:** `lifespan` calls `_try_connect(app)` **synchronously, before** the
   watchdog task exists. With `Type=simple` systemd starts the `WatchdogSec=30`
   timer at `exec`, not at `READY=1`, so the deadline is already running during
@@ -954,7 +1114,7 @@ consequences of the #8 fix that the docs written alongside it didn't account for
 
 ### 40. 🟡 `_watchdog` is an unguarded task, and it fails *closed*
 
-- **Where:** `app/app.py:134-152`
+- **Where:** `app/app.py:138-155`
 - **Issue:** Same shape as #32 (`_camera_watcher` dying silently), but the
   consequences are inverted. If the loop body raises — `probe.exception()`
   returning something the code doesn't expect, anything non-`OSError` escaping
@@ -970,7 +1130,7 @@ consequences of the #8 fix that the docs written alongside it didn't account for
 
 ### 41. 🟡 Shutdown during a bulb silently skips the cleanup it exists to perform
 
-- **Where:** `app/app.py:174-183` (`lifespan` teardown)
+- **Where:** `app/app.py:178-187` (`lifespan` teardown)
 - **Issue:** Both `set_recording(False)` and `camera.disconnect()` now go through
   `_bus(...)` with the 2s `BUS_TIMEOUT`, and both are wrapped in a bare
   `except Exception: pass`. While a bulb holds the bus (up to
@@ -1010,6 +1170,8 @@ consequences of the #8 fix that the docs written alongside it didn't account for
 
 ### 43. ⚪ `captures/` is not gitignored
 
+- **Status:** still open — `.gitignore` covers `__pycache__/`, `.venv/`,
+  `.vscode/` and `*.log`, but not `captures/` (re-checked 2026-08-03).
 - **Where:** `.gitignore`, `camera/gp2.py:14` (`CAPTURE_DIR`), `tools/setup.sh:140`
   (`WorkingDirectory`)
 - **Issue:** `CAPTURE_DIR` defaults to `"captures"`, CWD-relative, and the unit
@@ -1026,7 +1188,7 @@ consequences of the #8 fix that the docs written alongside it didn't account for
 
 ### 44. ⚪ `POST /api/settings/{name}` re-reads outside its own error mapping
 
-- **Where:** `app/app.py:389`
+- **Where:** `app/app.py:411`
 - **Issue:** The trailing `return await _run_camera(cam.list_settings)` sits
   **outside** the handler's `try`. A gphoto2 failure on the read-back is an
   unhandled 500 + traceback, while the identical failure on the write two lines
@@ -1092,13 +1254,20 @@ consequences of the #8 fix that the docs written alongside it didn't account for
 
 ### 47. ⚪ Nits
 
-- `camera/sony.py:8` — two dict entries jammed onto one line
-  (`"focus_mode_widget": "focusmode","af_modes": …`).
-- `camera/gp2.py:96-106` — `_bus` reads `self._busy_with` without the lock when
-  building the `CameraBusy` message, and `close()` reads it again after the
-  raise. Benign, but the refusal can name `None` or a stale operation, which
-  undercuts the "the refusal names the holder is most of the diagnosis" claim in
-  `camera.md`.
+- ✅ `camera/sony.py:8` — the two dict entries jammed onto one line have been
+  split; `GENERAL` is now one key per line. Fixed in `90755cf`.
+- ⬜ `camera/gp2.py:99-110` — `_bus` reads `self._busy_with` without the lock when
+  building the `CameraBusy` message, and `close()` (`:119-123`) reads it again
+  after the raise. Benign, but the refusal can name `None` or a stale operation,
+  which undercuts the "the refusal names the holder is most of the diagnosis"
+  claim in `camera.md`.
+- ⬜ `app/app.py:54-56` — `AfPoint.x/y` are bare `float`s with no `Field(ge=0,
+  le=1)`. Harmless today because `_scale` (`camera/gp2.py:418-419`) clamps to
+  `0..1` and `max(0.0, nan)` returns `0.0`, so even a `NaN` lands in-range — but
+  that is an accident of `max`'s argument order, not a check. Every other model
+  in the file bounds its inputs; this one is the exception.
+- ⬜ `tools/requirements.txt:3` — `websockets>=12 ` has a trailing space and no
+  explanatory comment, unlike every other line. Deleting it (#36) resolves both.
 
 ### 48. ✅ FIXED — Focus magnifier: a single-widget read serves a stale property cache
 
@@ -1219,6 +1388,295 @@ consequences of the #8 fix that the docs written alongside it didn't account for
 
 ---
 
+## Requirement gaps (third review pass, 2026-08-03)
+
+Measured against the Version 1 scope line *"full action and setting control over
+compatible Sony cameras"* and the two capability claims in
+`documentation/pathfinder_v1.tex`. Evidence throughout is
+`tests/fixtures/ilce_7m4.txt`, the checked-in `--list-all-config` dump of the
+α7 IV; the coverage table at the top of this file is the summary.
+
+**Read this first, because it reframes #50-#52:** the app's writable surface is
+defined by two module constants — `INCLUDE_SECTIONS` and `STATUS_SECTIONS`
+(`camera/gp2.py:54-55`). They were chosen when #6 closed the arbitrary-write
+hole, and choosing them was correct. But they are now the *only* thing deciding
+what "full control" means, they were never revisited against the requirement,
+and three of the four items below are consequences of that one pair of sets.
+
+### 50. 🟠 Aperture and shutter speed never appear in the settings panel
+
+- **Where:** `camera/gp2.py:375-381` (`_settable_widgets`, the
+  `not widget.get_readonly()` filter), `tests/fixtures/ilce_7m4.txt`
+- **Issue:** In the checked-in dump, `/main/capturesettings/f-number`
+  (`RADIO`, 17 choices, `f/3.5`) and `/main/capturesettings/shutterspeed`
+  (`RADIO`, 56 choices, `1/30`) are both **`Readonly: 1`**. `_settable_widgets`
+  drops read-only widgets, so neither is in `/api/settings`, so neither is in
+  the UI. The `/main/other` aliases are read-only too (`5007` F-Number, `d20d`
+  Shutter speed), so there is no second path to them either.
+- **Why it matters:** `documentation/pathfinder_v1.tex` Feature 6 promises
+  *"Full exposure control from the phone"* and Example Use Case 4 has the
+  operator adjusting *"ISO, aperture, and shutter speed from the phone"*. ISO
+  and exposure compensation are genuinely there and writable. The other two
+  named controls are not in the product at all, and nothing in the UI says so —
+  they are simply missing rows. This is the single largest distance between the
+  document and the code.
+- **The likely explanation is benign, which is exactly why it needs checking.**
+  The same dump has `/main/capturesettings/expprogram` reading **`P`**. In
+  Program AE the body owns both aperture and shutter, so libgphoto2 reporting
+  them read-only is *correct behaviour*, not a defect — and in **M** both would
+  be expected to flip writable, making the claim true with no code change. But
+  that has never been observed, the only dump we hold was taken in the one mode
+  where it cannot be true, and the same P-mode dial position already produced
+  one void verification round (#3). Do not write this off as "obviously fine";
+  it is one dump away from being settled either way.
+- **Fix, in order:**
+  1. Re-dump in **M** (`tools/camera-dump.sh`) and compare the `Readonly` line
+     on both widgets. Batch with #38/#3 — same dial trip.
+  2. If they are writable in M: nothing to fix in the camera layer, but land
+     #56 so a user in P can *see* why the controls are inert instead of finding
+     the panel silently shorter.
+  3. If they are still read-only in M: the write path is elsewhere (Sony's
+     newer control properties, #55) and this becomes a real feature gap. Check
+     `/main/settings/prioritymode` — it reads `Application` in the dump, which
+     should already be the permissive setting, so rule it out rather than
+     assume it.
+- **Test:** add the assertion to `tests/test_fake_fidelity.py`, where the
+  quirk-vs-hardware checks already live: for whatever the M-mode dump says,
+  pin it, so a future libgphoto2 build that changes this is caught by the suite
+  rather than by a photographer.
+
+### 51. 🟠 `/main/other` is excluded entirely — 156 writable properties, ~30 of them real settings
+
+- **Where:** `camera/gp2.py:54` (`INCLUDE_SECTIONS`), `camera/gp2.py:375-381`
+- **Issue:** The α7 IV publishes **346** widgets under `/main/other`, **156 of
+  them writable**, and Pathfinder reaches none of them. Most are noise — around
+  200 carry the placeholder label `PTP Property 0xNNNN` — but roughly 30 carry
+  real labels, and **14 of those are user-facing settings with no equivalent
+  anywhere in the three included sections**:
+
+  | Widget | Label | Widget | Label |
+  |---|---|---|---|
+  | `d23f` | Picture Profile | `d240` | Creative Style |
+  | `d241` | File Format Movie | `d242` | Recording Setting Movie |
+  | `d24f` | Interval REC Model | `d255` | AF Tracking Sens. Still |
+  | `d25f` | Zoom Setting | `d26a` | Live View Image Quality |
+  | `d262` | Wireless Flash | `d263` | Red Eye Reduction |
+  | `d254` | Focus Magnifier Setting | `d223` | Date/Time Set |
+  | `d210` | CC Filter | `d21c` | AB Filter |
+
+- **Why it matters:** "Full setting control" cannot honestly mean the 20
+  writable widgets in three sections while Picture Profile, both file formats
+  and interval-REC sit unreachable. `d24f` (Interval REC) is also the hardware
+  primitive the roadmap's intervalometer wants, and `d223` (Date/Time Set) is a
+  free fix for the no-RTC clock problem in #11 — the *camera* has a real clock,
+  and nothing currently reads or writes it.
+- **The fix is emphatically not `INCLUDE_SECTIONS |= {"other"}`.** That
+  re-opens #6 from the other side: it would expose ~200 unlabelled raw PTP
+  properties, every read-only status property as an inert row, and — the part
+  that actually breaks things — a pile of **duplicate controls**. At least a
+  dozen `other` entries are raw aliases of named widgets, verified against the
+  dump by matching choice counts:
+
+  | Raw | Named equivalent | Tell |
+  |---|---|---|
+  | `d252` Jpeg Quality | `capturesettings/jpegquality` | both 4 choices |
+  | `d253` File Format Still | `capturesettings/imagequality` | both 3 choices |
+  | `d203` Image size | `imgsettings/imagesize` | both 3 choices |
+  | `5005` White Balance | `imgsettings/whitebalance` | — |
+  | `d21e` ISO | `imgsettings/iso` | — |
+  | `5013` Still Capture Mode | `capturesettings/capturemode` | — |
+  | `d0d9` Image Stabilization | `capturesettings/imagestabilization` | — |
+  | `d222`, `d211`, `d231`, `d201`, `500a`, `500b`, `500c`, `5010`, `d22c` | capture-target, aspect-ratio, LV-effect, DRO, focus-mode, metering, flash, exp-comp, focus-area | — |
+
+  Two rows writing the same property is not merely untidy: the raw side reports
+  integer codes where the named side reports labels (`d253` offers `1/2/3`;
+  `imagequality` offers `RAW/RAW+JPEG/JPEG`), so the panel would show the same
+  setting twice with different vocabularies, and they would disagree after every
+  write through the stale-read path in #48. **This is the argument for an
+  allowlist rather than a section flag**, and it is why the table above lists 14
+  and not 30.
+- **Fix:** a per-vendor **allowlist** of `other` properties, in `camera/sony.py`
+  beside the quirks, each entry carrying the friendly label the driver doesn't
+  supply — e.g. `EXTRA_SETTINGS = {"d23f": "Picture Profile", …}`.
+  `_settable_widgets` grows a second pass over `other` filtered by that map.
+  Three properties this buys cheaply: the allowlist is data, so it is testable
+  against the fixture the way `test_fake_fidelity.TheQuirksMatchTheHardware`
+  already tests quirk names; the label problem is solved at the same time; and
+  the duplicate-shadowing question is answered explicitly per entry instead of
+  by accident. Land it **after** #13/#14 — an allowlist is a vendor-table key,
+  and adding a 17th key to a table that is already duplicated in full makes the
+  duplication worse.
+- **Also needs a UI answer:** 20 rows is a scrolling list; 50 is a wall. #35's
+  139-choice `capturemode` select is the warning. Grouping (Exposure / Image /
+  Movie / Focus) should land with this, not after it.
+
+### 52. 🟠 Telemetry can't produce two of the four readouts the v1 document promises
+
+- **Where:** `camera/gp2.py:55` (`STATUS_SECTIONS = {"status"}`),
+  `camera/gp2.py:354-362` (`telemetry`), `web/script.js:82-106`
+- **Issue:** `telemetry()` walks `/main/status` only, which on the α7 IV is
+  exactly 7 widgets: `serialnumber`, `manufacturer`, `cameramodel`,
+  `deviceversion`, `vendorextension`, `batterylevel`, `focusindication`.
+  Feature 7 of `documentation/pathfinder_v1.tex` promises *"battery, shots
+  remaining, lens, and model"*:
+  - **battery** ✅ `/main/status/batterylevel`
+  - **model** ✅ `/main/status/cameramodel`
+  - **shots remaining** ❌ — it exists, but as `/main/other/d249` *(Media SLOT1
+    Remaining Shots, `RANGE`, read-only; `d257` for slot 2)*, in the section
+    telemetry doesn't walk.
+  - **lens** ❌ — **no lens property appears anywhere in the dump.** Not in
+    `status`, not in `other`, not in the property summary. On this body and
+    this driver it may simply not be reportable.
+- **Why it matters:** Two of four promised readouts, one of which may be
+  unobtainable rather than merely unwired. The lens claim is the more important
+  one to resolve, because if libgphoto2 can't report it, the honest fix is to
+  the document, not the code — and it is better to find that now than in front
+  of someone holding the document.
+- **Worth adding while the section is open** (all read-only, all in `other`,
+  all genuinely useful on an unattended field device): `d251` Device Overheat
+  Status, `d248`/`d256` Media SLOT1/2 Status, `d24a` Media SLOT1 Shooting Time
+  (the movie-length counterpart to remaining shots), `d21d` Movie Recording
+  State (this is the camera-truth read #12 needs), `d221` Live View Status.
+- **Fix:** the same allowlist mechanism as #51 but for read-only properties —
+  `TELEMETRY_EXTRAS` in the vendor module, merged into `telemetry()`'s walk.
+  Ship the two together; they are one mechanism with two filters. Then correct
+  the v1 document's Feature 7 wording to whatever survives.
+
+### 53. 🟠 A provisioned device does not host its own WiFi on boot
+
+- **Where:** `tools/setup.sh:14` (`AP_ON_BOOT="${AP_ON_BOOT:-0}"`),
+  `tools/setup.sh:170-179`, `tools/setup.sh:126`
+  (`connection.autoconnect no`), `README.md:139`, `README.md:149`
+- **Issue:** `AP_ON_BOOT` **defaults to `0`**, so the finalize step leaves
+  `connection.autoconnect no` on the AP profile and prints "AP will NOT
+  auto-start". A device provisioned exactly as the README instructs comes up
+  after reboot with no Pathfinder network — it rejoins home WiFi, or nothing.
+- **Why it matters:** Both documents assume the opposite. `README.md:139`
+  presents `AP_ON_BOOT=0` as an opt-in development toggle ("create the AP
+  profile but don't auto-start it on boot"), which reads as a departure from
+  the default; `README.md:149` then says "After it finishes, reboot — the AP
+  and app both come up automatically." `documentation/pathfinder_v1.tex`
+  Feature 1 is *"The unit hosts a WiFi network named Pathfinder"* and the
+  "no app install, no internet" success criterion is recorded as **Met**. The
+  failure is silent, happens only after the operator has left, and looks like a
+  broken device rather than a configuration default.
+- **Fix:** default `AP_ON_BOOT=1` — the product's behaviour should be the
+  script's default, and the development case is the one that deserves the
+  explicit opt-out. Keep `AP_ON_BOOT=0` documented as that opt-out. If the
+  default is instead kept deliberately (e.g. to avoid stranding a Pi mid-
+  provisioning over SSH — a real concern, since bringing the AP up drops the
+  session), then say so in **both** documents and remove the "come up
+  automatically" line, because right now the code and the docs disagree and the
+  docs are what someone provisions from.
+- **Note:** this is the one requirement gap with no camera involvement, and the
+  cheapest to close.
+
+### 54. 🟡 Action coverage is hardcoded per body — there is no action discovery
+
+- **Where:** `app/app.py:243-384` (one bespoke route per action),
+  `camera/sony.py:1-18` (the widget names they resolve through)
+- **Issue:** Every action is a hand-written route resolving a hand-written
+  quirk key. On the α7 IV this covers **7 of the 8** `/main/actions` widgets —
+  `autofocus`, `manualfocus`, `bulb`, `movie`, `focusmagnifier`,
+  `spotfocusarea`, plus `capture` via `gp.GP_CAPTURE_IMAGE` — with only
+  `opcode` withheld. So the action half of the requirement is *met on this
+  body*. It is met by enumeration, though: a body whose action set differs gets
+  whatever `sony.py` happens to name and no way to discover the rest, and
+  `DEFAULT_QUIRKS` (`camera/gp2.py:26-43`) guesses generic names
+  (`autofocusdrive`, `manualfocusdrive`) that no Sony body has.
+- **Why it matters:** The requirement says "compatible Sony cameras", plural.
+  Today "compatible" means "listed in `sony.py`", and the only listed model has
+  an empty override dict (#15). The first second body will reveal how much of
+  this generalises, and the answer is currently "the parts that happen to share
+  widget names."
+- **Deliberate and worth writing down so nobody "fixes" it:**
+  `/main/actions/capture` exists as a `TOGGLE` and is **not** what `capture()`
+  drives — it uses `gp.GP_CAPTURE_IMAGE`, which handles the download handshake.
+  And `opcode` (`TEXT`, `0x1001,0xparam1,0xparam2`) is a raw PTP command
+  channel: it is excluded on purpose, and #6 is the reason. Neither is an
+  oversight.
+- **Fix:** fold action capability into the vendor contract from #14 — let a
+  vendor module *declare* which actions it supports, and have `/api/status` (or
+  a new `/api/capabilities`) publish that list so the UI can hide buttons the
+  body can't honour, instead of showing a button that 400s. That is also the
+  honest fix for the magnifier's `hidden` special-case in `web/script.js:175-182`,
+  which solves this problem once, for one feature.
+
+### 55. ⚪ The modern Sony remote-control property family is unexploited
+
+- **Where:** `tests/fixtures/ilce_7m4.txt` (`/main/other/d2c1`-`d2ea`)
+- **Issue:** The dump carries a contiguous block of writable control properties
+  that look like the α7 IV's current-generation remote surface, none of which
+  Pathfinder touches: `d2c1` ShutterHalfRelease, `d2c2` ShutterRelease, `d2c7`
+  RequestOneShooting, `d2c3` AELButton, `d2c4` AFLButton, `d2c9` FELButton,
+  `d2d9` AWBLButton, `d2d1` Manual Focus Adjust, `d2dc` AF Area Position,
+  `d2dd` Zoom Operation, `d2e9`/`d2ea` Save/Load Zoom and Focus Position.
+- **Why it's worth a rig session rather than a shrug:** three open items may
+  have their answers in here. `d2dc` is a candidate tap-to-focus write (#17,
+  where `spotfocusarea` is an untested `TEXT` widget); `d2d1` is a candidate
+  focus-nudge write; `d2e9`/`d2ea` would give the roadmap's automated
+  focus-transition feature a hardware primitive instead of a software
+  approximation. AE/AF lock are also genuinely missing controls.
+- **Caveat:** `d2d1`, `d2dc` and `d2dd` all advertise `Bottom: 0 Top: 0
+  Step: 0` — no usable range while the body is idle. That is why the dump
+  cannot settle any of this and the rig must, and it is also a trap for
+  `_within_range` (`camera/gp2.py:441-449`), which would clamp every write to
+  `0` against those bounds. Test with the body live and, if the ranges stay
+  degenerate, treat a `0..0` range as "unknown" rather than as a clamp.
+- **Fix:** add probes to `tools/hardware-check.py` — it already has the right
+  shape for exactly this (write, read back, report as a `note` rather than an
+  assertion when the finding is about the driver rather than our code). No
+  shutter needs to fire for most of these.
+
+### 56. 🟡 Read-only widgets are hidden rather than shown disabled
+
+- **Where:** `camera/gp2.py:375-381` (`_settable_widgets` drops them),
+  `camera/gp2.py:391-403` (`_describe` has no `readonly` field),
+  `web/script.js:307-319` (`renderSettings`)
+- **Issue:** A widget the body reports read-only is filtered out of
+  `/api/settings` entirely, so the UI cannot distinguish "this camera has no
+  such control" from "this control exists and is currently not writable." On
+  the α7 IV that hides 8 widgets, including aperture, shutter speed, focal
+  position and zoom.
+- **Why it matters:** This is the reason #50 went unnoticed for the life of the
+  project — a missing row looks like nothing at all. It is also why #20
+  (MTP mode) presents as a mystery: the panel is empty, and an empty panel and
+  a body with no controls look identical. Showing a disabled row with its
+  current value turns three separate invisible failures into one visible,
+  self-explaining state, and it is a smaller change than any of them.
+- **Fix:** add `"readonly": widget.get_readonly()` to `_describe`, yield
+  read-only widgets from a separate generator (keep `_settable_widget` — the
+  **write** allowlist from #6 — exactly as it is; this must not widen it), and
+  render those rows with the control `disabled`. The write path stays
+  unchanged, which is the whole point: the read surface and the write surface
+  are different questions, and #6 conflated them for good reasons that no
+  longer apply to the read side.
+- **Test:** `tests/test_gp2_camera.py::SetSetting` already asserts the round
+  trip "everything listed is writable" — that assertion must be **restated**,
+  not deleted: everything listed *and not marked read-only* is writable, and a
+  read-only name still 404s at `set_setting`. Getting that backwards silently
+  re-opens #6.
+
+### 57. ⚪ The document that defines the requirement is untracked
+
+- **Where:** `documentation/pathfinder_v1.tex` (untracked in git as of
+  `5e242fc`), `documentation/pathfinder_v1.tex:3`
+- **Issue:** `documentation/` is the only untracked path in the tree. The file
+  is the source of the Version 1 scope statement, the feature claims and the
+  success-criteria table — i.e. the thing #50-#53 are measured against — and it
+  exists on exactly one machine. Its own compile comment names a different
+  filename than the file has (`pathfinder-v1-information-document.tex`).
+- **Fix:** commit it, and add `*.aux`/`*.log`/`*.out`/`*.toc`/`*.pdf` under
+  `documentation/` to `.gitignore` (note `*.log` is already ignored globally,
+  which will silently cover the LaTeX log too). Fix the filename in the header
+  comment.
+- **While it's open,** three claims in it need edits once the items above land:
+  Feature 6's "full exposure control" (#50), Feature 7's "shots remaining, lens"
+  (#52), and the success-criteria row *"Setup for the operator — no app install,
+  no internet — Met"*, which is currently contingent on #53.
+
+---
+
 ## Suggested order
 
 **Done:** #1, #5, #6, #37, #45, #46, #48 (all verified on hardware except
@@ -1230,32 +1688,69 @@ dial-blocked, see below; #7 needs a body that is actually noisy on the event
 stream; #8 needs a `systemctl`/`kill -STOP` session on the Pi (it also needs
 `tools/setup.sh` re-run, or the unit edited by hand, to pick up `WatchdogSec`).
 
-**Blocked on physical access to the camera's mode dial** (needs M + BULB, and
-Long Exposure NR on): verifying #2, #3, and #38. Nothing else depends on this,
-so it is not on the critical path — do the items below while it waits.
+**Two tracks now, and they don't compete for the same time.** Everything from
+the first two review passes is *reliability* work on features that exist.
+#50-#57 are *requirement* work — the distance between the code and what Version
+1 says it does. The reliability list is longer, but the requirement list is what
+someone reading `documentation/pathfinder_v1.tex` will find first, and #53 in
+particular is a shipped-device defect with a one-line fix.
 
-0. **#49** — half done (the cheap half). What's left is the shared config
+**One rig trip settles an unusual amount.** The dial session below is currently
+blocking #2, #3, #38 *and* #50, and the same physical setup answers #17 and #55.
+Take a full `tools/camera-dump.sh` in **M + BULB** while you are there and check
+it in beside the P-mode fixture — several open questions are "we only ever
+dumped in P", which is also what made #3's verification round void.
+
+**Blocked on physical access to the camera's mode dial** (needs M + BULB, and
+Long Exposure NR on): verifying #2, #3, #38, and settling #50. Do the items
+below while it waits.
+
+0. **#53** — the AP doesn't come up on a provisioned device. One line, no
+   hardware, and it is the difference between a device that works out of the box
+   and one that appears dead. Do it first for the same reason you'd fix a power
+   rail before debugging a peripheral.
+1. **#49** — half done (the cheap half). What's left is the shared config
    snapshot, which subsumes **#19** and cuts a whole-tree read out of every
-   write path. Worth scheduling deliberately rather than bolting on.
-1. **#39, #40** — do these *with* the #8 hardware verification session, not
+   write path. Worth scheduling deliberately rather than bolting on — and note
+   #52 adds a second consumer of that snapshot, so the two are better designed
+   together than sequentially.
+2. **#39, #40** — do these *with* the #8 hardware verification session, not
    after it. Both are defects in the watchdog itself, and #39 is the one failure
    mode the `kill -STOP` test cannot reveal (it is armed by then). Cheap: an
    ordering change and a `try/except`.
-2. **#38** — refuse `bulb` when the body is not in BULB (the discovery command is
-   in that item; it needs the dial too, but only to *read* one value)
-3. **#13, #14** — quirk layering and vendor contract, **before** adding Canon/Nikon
-4. **#17** — mostly closed from the config dump; what's left needs the rig:
-   `af_area_size` corner-taps and the `autofocus`/`bulb` idle value (batch with
-   the #2/#3/#38 dial session — same setup, one trip). Both are natural checks to
+3. **#56** — show read-only widgets disabled. Small, self-contained, no
+   hardware, and it makes #50 and #20 visible instead of invisible. Landing it
+   *before* the rig trip means the M-mode check in #50 can be done by looking at
+   the phone rather than by diffing dumps.
+4. **#38** — refuse `bulb` when the body is not in BULB. Note the discovery
+   command in that item needs correcting (see its ⚠️ bullet) or #56 landing
+   first.
+5. **#13, #14** — quirk layering and vendor contract, **before** adding
+   Canon/Nikon *and before #51/#52*, which both want to add vendor-table keys.
+   Adding keys to a table that is duplicated in full is how the duplication got
+   from 13 keys to 16.
+6. **#51, #52** — the `/main/other` allowlists, settings and telemetry. One
+   mechanism, two filters; ship together. This is the bulk of what "full setting
+   control" is missing, and #52 also hands #12 its camera-truth read.
+7. **#17** — mostly closed from the config dump; what's left needs the rig:
+   `af_area_size` corner-taps (with `focusarea` set to a Flexible Spot first —
+   see the correction in that item), the `autofocus`/`bulb` idle value, and the
+   `d2dc` alternative from #55. Batch with the dial session. Natural checks to
    add to `tools/hardware-check.py` rather than do by hand; #48 is the worked
    example of why that pays off.
-5. **#9** — compare-and-swap in `_drop_camera`
-6. **#41** — batch with #30 and #32; all three are the same lifespan/task-hygiene
+8. **#9** — compare-and-swap in `_drop_camera`
+9. **#41** — batch with #30 and #32; all three are the same lifespan/task-hygiene
    pass, and #40 is the fourth
-7. **#10** — single shared liveview producer (largest change; what makes multi-client work)
-8. Everything else, opportunistically. #42-#44 and #47 are all small and
-   independent — good filler while hardware access is blocked.
+10. **#10** — single shared liveview producer (largest change; what makes
+    multi-client work)
+11. **#54, #55** — action discovery and the Sony control-property family. Both
+    are really "what does the second body need", so they belong with the
+    Canon/Nikon work rather than ahead of it.
+12. Everything else, opportunistically. #42-#44, #47 and #57 are all small and
+    independent — good filler while hardware access is blocked.
 
 #13 and #34 each have an `@expectedFailure` acceptance test already written in
 `tests/test_known_gaps.py` — start there. #5's and #6's have been promoted into
-the main suite now that they pass.
+the main suite now that they pass. When picking up #56, re-read the test note in
+that item before touching `test_gp2_camera.py::SetSetting`: the round-trip
+assertion it changes is what keeps #6 closed.
